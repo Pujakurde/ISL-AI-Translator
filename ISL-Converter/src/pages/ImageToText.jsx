@@ -5,7 +5,8 @@ import ThemeToggle from '../components/ThemeToggle'
 import BackButton from '../components/BackButton'
 
 
-const API_URL = import.meta.env.VITE_MODEL_API_URL || 'http://127.0.0.1:8000'
+const RAW_API_URL = import.meta.env.VITE_MODEL_API_URL || 'http://127.0.0.1:8000'
+const API_URL = RAW_API_URL.replace(/\/+$/, '')
 const IS_PROD = import.meta.env.PROD
 const IS_LOCAL_API = /localhost|127\.0\.0\.1/.test(API_URL)
 const NUMBERS = '0123456789'.split('')
