@@ -5,6 +5,9 @@ import ThemeToggle from '../components/ThemeToggle'
 import BackButton from '../components/BackButton'
 
 const API_URL = import.meta.env.VITE_MODEL_API_URL || 'http://127.0.0.1:8000'
+const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY
+const IS_PROD = import.meta.env.PROD
+const IS_LOCAL_API = /localhost|127\.0\.0\.1/.test(API_URL)
 const CAPTURE_SIZE = 224
 
 function CameraToText() {
@@ -28,10 +31,11 @@ function CameraToText() {
 
   async function getSuggestions(currentWord) {
     if (!currentWord || currentWord.length < 1) { setSuggestions([]); return }
+    if (!GROQ_API_KEY) { setSuggestions([]); return }
     try {
       const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${import.meta.env.VITE_GROQ_API_KEY}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` },
         body: JSON.stringify({
           model: 'llama-3.1-8b-instant',
           max_tokens: 50,
@@ -82,6 +86,9 @@ function CameraToText() {
     if (!videoRef.current || loading) return
     setLoading(true)
     try {
+      if (IS_PROD && IS_LOCAL_API) {
+        throw new Error('Missing VITE_MODEL_API_URL for production')
+      }
       const video = videoRef.current
       const vw = video.videoWidth
       const vh = video.videoHeight

@@ -5,6 +5,7 @@ import ISLIllustration from '../components/ISLIllustration'
 import Footer from '../components/Footer'
 import { useState, useRef, useEffect } from 'react'
  
+const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY
 
 const facts = [
   "ISL is a complete, natural language with its own complex grammar and syntax ✋",
@@ -138,6 +139,13 @@ function AIChatCard() {
   async function sendMessage() {
     const text = input.trim()
     if (!text || loading) return
+    if (!GROQ_API_KEY) {
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        text: 'Chat is disabled until VITE_GROQ_API_KEY is set for the frontend build.'
+      }])
+      return
+    }
 
     const userMsg = { role: 'user', text }
     setMessages(prev => [...prev, userMsg])
@@ -149,7 +157,7 @@ function AIChatCard() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${import.meta.env.VITE_GROQ_API_KEY}`
+          'Authorization': `Bearer ${GROQ_API_KEY}`
         },
         body: JSON.stringify({
           model: 'llama-3.1-8b-instant',
