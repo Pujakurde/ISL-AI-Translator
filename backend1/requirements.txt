@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+python-multipart
+tensorflow==2.19.1
+Pillow
+numpy
+mediapipe==0.10.9
