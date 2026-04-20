@@ -5,10 +5,7 @@ import ThemeToggle from '../components/ThemeToggle'
 import BackButton from '../components/BackButton'
 
 
-const RAW_API_URL = import.meta.env.VITE_MODEL_API_URL || 'http://127.0.0.1:8000'
-const API_URL = RAW_API_URL.replace(/\/+$/, '')
-const IS_PROD = import.meta.env.PROD
-const IS_LOCAL_API = /localhost|127\.0\.0\.1/.test(API_URL)
+const API_URL = import.meta.env.VITE_MODEL_API_URL || 'http://127.0.0.1:8000'
 const NUMBERS = '0123456789'.split('')
 const ALPHABETS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')
 const ONEHAND_SET = new Set(['C', 'I', 'L', 'O', 'U', 'V'])
@@ -41,9 +38,6 @@ function ImageToText() {
     setError('')
 
     try {
-      if (IS_PROD && IS_LOCAL_API) {
-        throw new Error('Missing VITE_MODEL_API_URL for production')
-      }
       // fetch image from your public folder
       const imageUrl = `/Signs/${sign}.jpg`
       const response = await fetch(imageUrl)
@@ -184,6 +178,9 @@ function ImageToText() {
                     <div className="img2text-sign-fallback" style={{ display: 'none' }}>
                       {sign === 'space' ? '␣' : sign}
                     </div>
+                    <span className="img2text-sign-label">
+                      {sign === 'space' ? '␣' : sign}
+                    </span>
                     
                   </motion.div>
                 ))}

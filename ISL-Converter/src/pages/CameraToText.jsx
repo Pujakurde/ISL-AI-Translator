@@ -1,396 +1,417 @@
 import { useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import ThemeToggle from '../components/ThemeToggle'
 import BackButton from '../components/BackButton'
+import { ENDPOINTS } from '../api'
 
-const RAW_API_URL = import.meta.env.VITE_MODEL_API_URL || 'http://127.0.0.1:8000'
-const API_URL = RAW_API_URL.replace(/\/+$/, '')
-const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY
-const IS_PROD = import.meta.env.PROD
-const IS_LOCAL_API = /localhost|127\.0\.0\.1/.test(API_URL)
-const CAPTURE_SIZE = 224
+const POLL_INTERVAL_MS = 800
+
+const MODES = [
+  {
+    value: 'alphabet',
+    label: 'Alphabets',
+    detail: 'A-Z signs',
+    hint: 'Alphabet mode is active. Show A-Z signs to build words.',
+  },
+  {
+    value: 'numeric',
+    label: 'Numbers',
+    detail: '0-9 signs',
+    hint: 'Number mode is active. Show 0-9 signs to build digits.',
+  },
+]
 
 function CameraToText() {
-  const navigate = useNavigate()
-  const videoRef = useRef(null)
-  const intervalRef = useRef(null)
+  const lastWordRef = useRef('')
 
   const [started, setStarted] = useState(false)
-  const [autoMode, setAutoMode] = useState(false)
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
-  const [letters, setLetters] = useState([])
-  const [lastDetected, setLastDetected] = useState(null)
-  const [confidence, setConfidence] = useState(null)
+  const [mode, setMode] = useState('alphabet')
+  const [streamSrc, setStreamSrc] = useState('')
+  const [word, setWord] = useState('')
+  const [lastDetected, setLastDetected] = useState('')
   const [suggestions, setSuggestions] = useState([])
-  const [modelType, setModelType] = useState('onehand')
-  const [mirror, setMirror] = useState(false)
-  const [cropScale, setCropScale] = useState(0.6)
+  const [error, setError] = useState('')
+  const [captureHint, setCaptureHint] = useState(MODES[0].hint)
 
-  const word = letters.join('')
+  const displayWord = word.toUpperCase()
+  const activeMode = MODES.find(item => item.value === mode) || MODES[0]
 
-  async function getSuggestions(currentWord) {
-    if (!currentWord || currentWord.length < 1) { setSuggestions([]); return }
-    if (!GROQ_API_KEY) { setSuggestions([]); return }
+  function applyPrediction(nextPrediction) {
+    const nextWord = String(nextPrediction || '')
+    const previousWord = lastWordRef.current
+
+    if (nextWord !== previousWord) {
+      if (nextWord.length > previousWord.length && nextWord.startsWith(previousWord)) {
+        setLastDetected(nextWord.slice(previousWord.length).slice(-1).toUpperCase())
+      } else {
+        setLastDetected(nextWord.slice(-1).toUpperCase())
+      }
+      lastWordRef.current = nextWord
+      setWord(nextWord)
+    }
+  }
+
+  async function setBackendMode(nextMode) {
+    const response = await fetch(ENDPOINTS.setMode(nextMode))
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}))
+      throw new Error(data.detail || data.error || 'Could not switch camera mode')
+    }
+  }
+
+  async function changeMode(nextMode) {
+    const nextModeConfig = MODES.find(item => item.value === nextMode) || MODES[0]
+    setMode(nextMode)
+    setCaptureHint(nextModeConfig.hint)
+    setSuggestions([])
+    setError('')
+
+    if (!started) return
+
     try {
-      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` },
-        body: JSON.stringify({
-          model: 'llama-3.1-8b-instant',
-          max_tokens: 50,
-          temperature: 0.3,
-          messages: [
-            { role: 'system', content: `You are a word suggestion engine. Given letters typed so far, suggest exactly 4 common English words that start with those letters. Reply ONLY with 4 words separated by commas. No explanation. No punctuation except commas. Example: hello,help,helmet,held` },
-            { role: 'user', content: currentWord.toLowerCase() }
-          ]
-        })
-      })
-      const data = await response.json()
-      const text = data.choices?.[0]?.message?.content || ''
-      const words = text.split(',').map(w => w.trim()).filter(w => w.length > 0).slice(0, 4)
-      setSuggestions(words)
-    } catch { setSuggestions([]) }
+      await setBackendMode(nextMode)
+    } catch (err) {
+      setError(err?.message || 'Could not switch camera mode')
+    }
   }
 
   async function startCamera() {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user' }
-      })
-      videoRef.current.srcObject = stream
-      setStarted(true)
-      setError('')
-    } catch { setError('Could not access camera. Please allow camera permission!') }
-  }
+    if (started) return
 
-  function stopCamera() {
-    const stream = videoRef.current?.srcObject
-    if (stream) stream.getTracks().forEach(t => t.stop())
-    setStarted(false)
-    stopAuto()
-    setLastDetected(null)
-  }
-
-  function startAuto() {
-    setAutoMode(true)
-    intervalRef.current = setInterval(() => { predictFrame() }, 2000)
-  }
-
-  function stopAuto() {
-    setAutoMode(false)
-    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
-  }
-
-  async function predictFrame() {
-    if (!videoRef.current || loading) return
     setLoading(true)
+    setError('')
     try {
-      if (IS_PROD && IS_LOCAL_API) {
-        throw new Error('Missing VITE_MODEL_API_URL for production')
-      }
-      const video = videoRef.current
-      const vw = video.videoWidth
-      const vh = video.videoHeight
-      if (!vw || !vh) throw new Error('Camera not ready')
+      await setBackendMode(mode)
+      await fetch(ENDPOINTS.clearLastSign, { method: 'DELETE' }).catch(() => {})
+      lastWordRef.current = ''
+      setWord('')
+      setLastDetected('')
+      setSuggestions([])
+      setStreamSrc(`${ENDPOINTS.videoFeed}?t=${Date.now()}`)
+      setStarted(true)
+      setCaptureHint(`${activeMode.hint} Hold one sign steady until it appears.`)
+    } catch (err) {
+      setError(err?.message || 'Cannot connect to backend. Make sure backend1 is running.')
+    } finally {
+      setLoading(false)
+    }
+  }
 
-      const minSide = Math.min(vw, vh)
-      const cropSize = Math.max(1, Math.floor(minSide * cropScale))
-      const sx = Math.floor((vw - cropSize) / 2)
-      const sy = Math.floor((vh - cropSize) / 2)
+  async function stopCamera() {
+    setStarted(false)
+    setStreamSrc('')
+    setLastDetected('')
+    setCaptureHint('Camera stopped. Choose a mode and start again when ready.')
+    await fetch(ENDPOINTS.stopCamera, { method: 'POST' }).catch(() => {})
+  }
 
-      const canvas = document.createElement('canvas')
-      canvas.width = CAPTURE_SIZE
-      canvas.height = CAPTURE_SIZE
-      const ctx = canvas.getContext('2d')
-      if (!ctx) throw new Error('Canvas error')
+  async function clearAll() {
+    setError('')
+    try {
+      await fetch(ENDPOINTS.clearLastSign, { method: 'DELETE' })
+    } catch {
+      setError('Could not clear backend text, but the frontend was reset.')
+    }
+    lastWordRef.current = ''
+    setWord('')
+    setLastDetected('')
+    setSuggestions([])
+  }
 
-      if (mirror) {
-        ctx.translate(CAPTURE_SIZE, 0)
-        ctx.scale(-1, 1)
-      }
-      ctx.drawImage(video, sx, sy, cropSize, cropSize, 0, 0, CAPTURE_SIZE, CAPTURE_SIZE)
+  async function removeLastLetter() {
+    if (!word) return
 
-      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg'))
-      if (!blob) throw new Error('Failed to capture frame')
+    setError('')
+    try {
+      const response = await fetch(ENDPOINTS.lastSignLast, { method: 'DELETE' })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.detail || data.error || 'Undo failed')
+      lastWordRef.current = String(data.prediction || '')
+      setWord(String(data.prediction || ''))
+      setLastDetected('')
+    } catch (err) {
+      setError(err?.message || 'Could not undo the last sign.')
+    }
+  }
 
-      const formData = new FormData()
-      formData.append('file', blob, 'frame.jpg')
-      formData.append('model_type', modelType)
+  async function acceptSuggestion(suggestion) {
+    const nextWord = suggestion.toLowerCase()
+    setError('')
 
-      const response = await fetch(`${API_URL}/predict`, {
+    try {
+      const response = await fetch(ENDPOINTS.lastSign, {
         method: 'POST',
-        body: formData
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: nextWord }),
       })
       const data = await response.json()
-      if (!response.ok) {
-        setError(data.detail || 'API Error')
-      } else {
-        const detected = String(data.prediction || '').toUpperCase()
-        if (!detected) throw new Error('Empty prediction')
-        setLastDetected(detected)
-        setConfidence(Math.round((data.confidence || 0) * 100))
-        setLetters(prev => {
-          const newLetters = [...prev, detected]
-          if (modelType !== 'number') getSuggestions(newLetters.join(''))
-          else setSuggestions([])
-          return newLetters
-        })
-        setError('')
-      }
+      if (!response.ok) throw new Error(data.detail || data.error || 'Could not apply suggestion')
+      lastWordRef.current = String(data.prediction || nextWord)
+      setWord(String(data.prediction || nextWord))
+      setLastDetected('')
     } catch (err) {
-      setError(err?.message || 'Cannot connect to API. Make sure backend is running!')
+      setError(err?.message || 'Could not apply suggestion.')
     }
-    setLoading(false)
   }
 
-  function removeLastLetter() {
-    setLetters(prev => {
-      const newLetters = prev.slice(0, -1)
-      if (modelType !== 'number') getSuggestions(newLetters.join(''))
-      else setSuggestions([])
-      return newLetters
-    })
-  }
-
-  function clearAll() {
-    setLetters([])
-    setLastDetected(null)
-    setConfidence(null)
-    setError('')
-    setSuggestions([])
-  }
-
-  useEffect(() => { return () => { stopCamera() } }, [])
   useEffect(() => {
-    setLetters([])
-    setLastDetected(null)
-    setConfidence(null)
-    setSuggestions([])
-    setError('')
-  }, [modelType])
+    if (!started) return undefined
+
+    let cancelled = false
+
+    async function pollPrediction() {
+      try {
+        const response = await fetch(ENDPOINTS.lastSign)
+        const data = await response.json()
+        if (!response.ok) throw new Error(data.detail || data.error || 'Prediction polling failed')
+        if (!cancelled) {
+          applyPrediction(data.prediction)
+          setError('')
+        }
+      } catch {
+        if (!cancelled) {
+          setError('Cannot read camera prediction. Check that backend1 is still running.')
+        }
+      }
+    }
+
+    pollPrediction()
+    const intervalId = window.setInterval(pollPrediction, POLL_INTERVAL_MS)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(intervalId)
+    }
+  }, [started])
+
+  useEffect(() => {
+    if (mode !== 'alphabet' || !word) {
+      setSuggestions([])
+      return undefined
+    }
+
+    let cancelled = false
+
+    async function loadSuggestions() {
+      try {
+        const response = await fetch(ENDPOINTS.suggestions(word))
+        const data = await response.json()
+        if (!cancelled) {
+          setSuggestions(Array.isArray(data.suggestions) ? data.suggestions.slice(0, 4) : [])
+        }
+      } catch {
+        if (!cancelled) setSuggestions([])
+      }
+    }
+
+    loadSuggestions()
+
+    return () => {
+      cancelled = true
+    }
+  }, [mode, word])
+
+  useEffect(() => {
+    return () => {
+      fetch(ENDPOINTS.stopCamera, { method: 'POST' }).catch(() => {})
+    }
+  }, [])
 
   return (
     <div className="cam-fullpage">
       <BackButton />
       <ThemeToggle />
 
-      {/* FULL SCREEN CAMERA */}
-      <div className="cam-fullscreen">
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          className="cam-fullvideo"
-          style={{
-            display: started ? 'block' : 'none',
-            transform: mirror ? 'scaleX(-1)' : 'none'
-          }}
-        />
-
-        {started && (
-          <div
-            className="cam-guide-box"
-            style={{ width: `${cropScale * 100}%`, height: `${cropScale * 100}%` }}
-          />
-        )}
-
-        {!started && (
-          <div className="cam-full-placeholder">
-            <motion.div
-              animate={{ scale: [1, 1.1, 1] }}
-              transition={{ duration: 2, repeat: Infinity }}
-              style={{ fontSize: 64 }}
-            >
-              📷
-            </motion.div>
-            <p style={{ color: '#6A2E3B', fontSize: 16, marginTop: 12 }}>Camera not started</p>
-            <p style={{ color: '#B06A73', fontSize: 13, marginTop: 4 }}>Click Start below</p>
+      <div className="cam-layout">
+        <div className="cam-left-panel">
+          <div className="cam-mode-row" aria-label="Camera detection mode">
+            {MODES.map(item => (
+              <motion.button
+                key={item.value}
+                className={`cam-mode-btn ${mode === item.value ? 'active' : ''}`}
+                onClick={() => changeMode(item.value)}
+                whileHover={{ scale: 1.03 }}
+                whileTap={{ scale: 0.97 }}
+                type="button"
+              >
+                <span>{item.label}</span>
+                <small>{item.detail}</small>
+              </motion.button>
+            ))}
           </div>
-        )}
 
-        {started && autoMode && (
-          <div className="cam-live-badge">
-            <span className="cam-live-dot" />
-            LIVE
+          <div className="cam-fullscreen">
+            {started && streamSrc ? (
+              <img
+                src={streamSrc}
+                alt="Live ISL camera detection"
+                className="cam-fullvideo"
+                onError={() => {
+                  setError('Camera stream failed. Make sure backend1 can access your webcam.')
+                  setStarted(false)
+                  setStreamSrc('')
+                }}
+              />
+            ) : (
+              <div className="cam-full-placeholder">
+                <div className="cam-placeholder-icon">CAM</div>
+                <p style={{ color: '#6A2E3B', fontSize: 16, marginTop: 12 }}>Camera not started</p>
+                <p style={{ color: '#B06A73', fontSize: 13, marginTop: 4 }}>
+                  Pick Alphabets or Numbers, then click Start
+                </p>
+              </div>
+            )}
+
+            {started && (
+              <div className="cam-live-badge">
+                <span className="cam-live-dot" />
+                LIVE {activeMode.detail}
+              </div>
+            )}
+
+            <AnimatePresence>
+              {started && lastDetected && (
+                <motion.div
+                  className="cam-big-overlay"
+                  key={`${lastDetected}-${word.length}`}
+                  initial={{ scale: 0.4, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ type: 'spring', stiffness: 300, damping: 20 }}
+                >
+                  {lastDetected}
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
-        )}
 
-        <AnimatePresence>
-          {started && lastDetected && (
-            <motion.div
-              className="cam-big-overlay"
-              key={lastDetected + Date.now()}
-              initial={{ scale: 0.4, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ type: 'spring', stiffness: 300, damping: 20 }}
-            >
-              {lastDetected}
-              {confidence && <span className="cam-overlay-conf">{confidence}%</span>}
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-
-      {/* BOTTOM DETECTION CARD */}
-      <motion.div
-        className="cam-bottom-card"
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.2 }}
-      >
-        {/* Model Type Selection */}
-        <div className="dict-filters" style={{ marginBottom: 10 }}>
-          {[
-            { key: 'onehand', label: 'One Hand' },
-            { key: 'twohand', label: 'Two Hands' },
-            { key: 'number', label: 'Numbers' },
-          ].map(m => (
-            <button
-              key={m.key}
-              className={`dict-filter-btn ${modelType === m.key ? 'active' : ''}`}
-              onClick={() => setModelType(m.key)}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
-        <div className="cam-control-row">
-          <label className="cam-toggle">
-            <input
-              type="checkbox"
-              checked={mirror}
-              onChange={e => setMirror(e.target.checked)}
-            />
-            <span>Mirror</span>
-          </label>
-          <div className="cam-slider">
-            <span className="cam-slider-label">Crop</span>
-            <input
-              type="range"
-              min="0.4"
-              max="0.9"
-              step="0.05"
-              value={cropScale}
-              onChange={e => setCropScale(parseFloat(e.target.value))}
-            />
-            <span className="cam-slider-value">{Math.round(cropScale * 100)}%</span>
-          </div>
-        </div>
-
-        {/* ROW 1 — buttons + word box — never scrolls */}
-        <div className="cam-bottom-top">
-          <div className="cam-btn-row">
+          <div className="cam-button-row">
             {!started ? (
-              <motion.button className="cam-action-btn primary" onClick={startCamera} whileHover={{ scale: 1.04 }} whileTap={{ scale: 0.96 }}>
-                📷 Start
+              <motion.button
+                className="cam-action-btn primary"
+                onClick={startCamera}
+                disabled={loading}
+                whileHover={{ scale: 1.04 }}
+                whileTap={{ scale: 0.96 }}
+                type="button"
+              >
+                {loading ? 'Starting...' : 'Start Camera'}
               </motion.button>
             ) : (
-              <>
-                <motion.button className="cam-action-btn primary" onClick={predictFrame} disabled={loading} whileHover={{ scale: 1.04 }} whileTap={{ scale: 0.96 }}>
-                  {loading ? '...' : '📸 Capture'}
-                </motion.button>
-                <motion.button className={`cam-action-btn ${autoMode ? 'stop' : 'auto'}`} onClick={autoMode ? stopAuto : startAuto} whileHover={{ scale: 1.04 }} whileTap={{ scale: 0.96 }}>
-                  {autoMode ? '⏹ Stop Auto' : '▶ Auto'}
-                </motion.button>
-                <motion.button className="cam-action-btn secondary" onClick={stopCamera} whileHover={{ scale: 1.04 }} whileTap={{ scale: 0.96 }}>
-                  ⏹ Stop
-                </motion.button>
-              </>
+              <motion.button
+                className="cam-action-btn stop"
+                onClick={stopCamera}
+                whileHover={{ scale: 1.04 }}
+                whileTap={{ scale: 0.96 }}
+                type="button"
+              >
+                Stop Camera
+              </motion.button>
+            )}
+
+            <motion.button
+              className="cam-action-btn secondary"
+              onClick={removeLastLetter}
+              disabled={!word}
+              whileHover={{ scale: 1.04 }}
+              whileTap={{ scale: 0.96 }}
+              type="button"
+            >
+              Undo
+            </motion.button>
+
+            <motion.button
+              className="cam-action-btn secondary"
+              onClick={clearAll}
+              disabled={!word && !lastDetected}
+              whileHover={{ scale: 1.04 }}
+              whileTap={{ scale: 0.96 }}
+              type="button"
+            >
+              Clear
+            </motion.button>
+          </div>
+        </div>
+
+        <motion.div
+          className="cam-bottom-card"
+          initial={{ opacity: 0, x: 20 }}
+          animate={{ opacity: 1, x: 0 }}
+          transition={{ delay: 0.2 }}
+        >
+          <div className="cam-bottom-top">
+            {displayWord ? (
+              <div className="cam-word-box">
+                <p className="cam-word-label">Detected Text</p>
+                <motion.p className="cam-word-display" key={displayWord} initial={{ scale: 0.95 }} animate={{ scale: 1 }}>
+                  {displayWord}
+                </motion.p>
+              </div>
+            ) : (
+              <div className="cam-word-empty">
+                <p>Detected signs will appear here</p>
+              </div>
             )}
           </div>
 
-          {word ? (
-            <div className="cam-word-box">
-              <p className="cam-word-label">Detected Word</p>
-              <motion.p className="cam-word-display" key={word} initial={{ scale: 0.95 }} animate={{ scale: 1 }}>
-                {word}
-              </motion.p>
+          <div className="cam-scroll-area">
+            <div className="cam-status-card">
+              <span>Mode: {activeMode.label}</span>
+              <p>{captureHint}</p>
             </div>
-          ) : (
-            <div className="cam-word-empty"><p>Signs will appear here</p></div>
-          )}
-        </div>
 
-        {/* ROW 2 — scrollable area for suggestions + letters + edit buttons */}
-        <div className="cam-scroll-area">
+            <AnimatePresence>
+              {suggestions.length > 0 && (
+                <motion.div
+                  className="cam-suggestions"
+                  initial={{ opacity: 0, y: 5 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                >
+                  <span className="cam-suggest-label">Suggestions</span>
+                  {suggestions.map((suggestion, index) => (
+                    <motion.button
+                      key={`${suggestion}-${index}`}
+                      className="cam-suggest-btn"
+                      onClick={() => acceptSuggestion(suggestion)}
+                      whileHover={{ scale: 1.05, y: -2 }}
+                      whileTap={{ scale: 0.95 }}
+                      initial={{ opacity: 0, x: -5 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: index * 0.05 }}
+                      type="button"
+                    >
+                      {suggestion}
+                    </motion.button>
+                  ))}
+                </motion.div>
+              )}
+            </AnimatePresence>
 
-          {/* suggestions */}
-          <AnimatePresence>
-            {suggestions.length > 0 && (
-              <motion.div
-                className="cam-suggestions"
-                initial={{ opacity: 0, y: 5 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0 }}
-              >
-                <span className="cam-suggest-label">💡</span>
-                {suggestions.map((w, i) => (
-                  <motion.button
-                    key={i}
-                    className="cam-suggest-btn"
-                    onClick={() => { setLetters(w.toUpperCase().split('')); getSuggestions(w) }}
-                    whileHover={{ scale: 1.05, y: -2 }}
-                    whileTap={{ scale: 0.95 }}
-                    initial={{ opacity: 0, x: -5 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ delay: i * 0.05 }}
-                  >
-                    {w}
-                  </motion.button>
-                ))}
+            <div className="cam-letters-wrap">
+              {displayWord.split('').map((letter, index) => (
+                <span className="cam-letter-pill" key={`${letter}-${index}`}>
+                  {letter}
+                </span>
+              ))}
+            </div>
+
+            {started && (
+              <p className="cam-auto-info">
+                <span className="cam-live-dot" style={{ display: 'inline-block', marginRight: 6 }} />
+                Backend camera detection is running automatically.
+              </p>
+            )}
+
+            {error && (
+              <motion.div className="error-box" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+                {error}
               </motion.div>
             )}
-          </AnimatePresence>
-
-          {letters.length > 0 && (
-            <div className="cam-bottom-bottom">
-              <div className="cam-letters-wrap">
-                <AnimatePresence>
-                  {letters.map((letter, i) => (
-                    <motion.div
-                      key={i}
-                      className="cam-letter-pill"
-                      initial={{ opacity: 0, scale: 0.5 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.5 }}
-                      transition={{ type: 'spring', stiffness: 300 }}
-                    >
-                      {letter}
-                    </motion.div>
-                  ))}
-                </AnimatePresence>
-              </div>
-            </div>
-          )}
-
-              <div className="cam-edit-row">
-                <motion.button className="cam-edit-btn" onClick={removeLastLetter} whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.9 }}>
-                  ← Undo
-                </motion.button>
-                <motion.button className="cam-edit-btn danger" onClick={clearAll} whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.9 }}>
-                  ✕ Clear
-                </motion.button>
-              </div>
-            
-
-          {autoMode && (
-            <p className="cam-auto-info">
-              <span className="cam-live-dot" style={{ display: 'inline-block', marginRight: 6 }} />
-              Auto detecting every 2 seconds...
-            </p>
-          )}
-
-          {error && (
-            <motion.div className="error-box" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-              {error}
-            </motion.div>
-          )}
-
-        </div>
-      </motion.div>
+          </div>
+        </motion.div>
+      </div>
     </div>
   )
 }

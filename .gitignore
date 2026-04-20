@@ -13,6 +13,7 @@ __pycache__/
 .venv/
 venv/
 env/
+isl_env/
 
 # Node / frontend
 node_modules/
@@ -22,6 +23,8 @@ dist-ssr/
 
 # Logs
 *.log
+*.zip
+ISL-Converter/build-output.txt
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -40,3 +43,12 @@ Thumbs.db
 
 # Tooling
 .qodo/
+
+# Keep backend1 lightweight in GitHub: runtime samples/models only.
+backend1/dataset/Indian/*/*
+!backend1/dataset/Indian/*/4.jpg
+!backend1/dataset/Indian/*/4.png
+backend1/extract_landmarks/
+backend1/numerical_landmarks/
+backend1/onehand_landmarks/
+backend1/models/X.npy
