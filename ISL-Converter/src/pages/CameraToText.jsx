@@ -11,13 +11,13 @@ const MODES = [
     value: 'alphabet',
     label: 'Alphabets',
     detail: 'A-Z signs',
-    hint: 'Alphabet mode is active. Show A-Z signs to build words.',
+    hint: 'Alphabet mode is active. The app switches automatically between one-hand and two-hand letter models.',
   },
   {
     value: 'numeric',
     label: 'Numbers',
     detail: '0-9 signs',
-    hint: 'Number mode is active. Show 0-9 signs to build digits.',
+    hint: 'Number mode is active. Show one clear 0-9 hand sign to build digits.',
   },
 ]
 

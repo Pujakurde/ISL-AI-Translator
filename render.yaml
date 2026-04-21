@@ -10,7 +10,7 @@ services:
     runtime: static
     rootDir: ISL-Converter
     buildCommand: npm install && npm run build
-    staticPublishPath: ISL-Converter/dist
+    staticPublishPath: dist
     routes:
       - type: rewrite
         source: /*
