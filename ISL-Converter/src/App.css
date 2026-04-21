@@ -523,15 +523,17 @@ body { font-family: 'Segoe UI', sans-serif; }
 .img2text-loading { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-muted); }
 
 /* ── CAMERA FULLSCREEN PAGE ── */
+
 .cam-fullpage {
-  height: 100vh;
+  
+  min-height: 100vh;
   background: var(--cam-page-bg);
-  display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   position: relative;
-  padding: 12px;
   gap: 12px;
+  scrollbar-width: thin;
 }
 
 .cam-layout {
