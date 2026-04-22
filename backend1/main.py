@@ -35,6 +35,9 @@ CAMERA_MARGIN_THRESHOLD = 0.15
 FULL_FRAME_NUMBER_CONFIDENCE_THRESHOLD = 0.95
 FULL_FRAME_NUMBER_MARGIN_THRESHOLD = 0.2
 ROUTER_CONFIDENCE_THRESHOLD = 0.6
+FULL_FRAME_FALLBACK_CONFIDENCE_THRESHOLD = 0.95
+FULL_FRAME_FALLBACK_MARGIN_THRESHOLD = 0.2
+FULL_FRAME_OVERRIDE_CONFIDENCE_THRESHOLD = 0.99
 ONEHAND_CLASS_SET = {"C", "I", "L", "O", "U", "V"}
 NUMBER_CLASS_SET = set(string.digits)
 LIVE_ONEHAND_LABELS = ["C", "I", "J", "L", "O", "U", "V"]
@@ -113,6 +116,8 @@ MODELS = {model_type: load_model(str(path)) for model_type, path in MODEL_PATHS.
 LABELS = {model_type: load_labels(path) for model_type, path in LABEL_PATHS.items()}
 ROUTER_MODEL = load_model(str(ROUTER_MODEL_PATH))
 LIVE_MODELS = {model_type: load_model(str(path)) for model_type, path in LIVE_MODEL_PATHS.items()}
+IMAGE_ONEHAND_CLASS_SET = set(LABELS["onehand"].values())
+IMAGE_TWOHAND_CLASS_SET = set(LABELS["twohand"].values())
 LIVE_LABELS = {
     "number": {index: label for index, label in enumerate(sorted(NUMBER_CLASS_SET))},
     "onehand": {index: label for index, label in enumerate(LIVE_ONEHAND_LABELS)},
@@ -249,6 +254,46 @@ def predict_router_label(rgb_image: np.ndarray) -> tuple[str, float]:
     predictions = ROUTER_MODEL.predict(preprocess_rgb_image(rgb_image, "number"), verbose=0)[0]
     index = int(np.argmax(predictions))
     return ROUTER_LABELS.get(index, str(index)), float(np.max(predictions))
+
+
+def resolve_label_model_type(label: str) -> Optional[str]:
+    if label in NUMBER_CLASS_SET:
+        return "number"
+    if label in IMAGE_ONEHAND_CLASS_SET:
+        return "onehand"
+    if label in IMAGE_TWOHAND_CLASS_SET:
+        return "twohand"
+    return None
+
+
+def predict_full_frame_fallback(rgb_image: np.ndarray) -> tuple[str, float, str]:
+    router_label, router_confidence = predict_router_label(rgb_image)
+    model_type = resolve_label_model_type(router_label)
+    if model_type is None:
+        return "", router_confidence, ""
+
+    image_label, image_confidence, image_margin = predict_rgb_image(rgb_image, model_type)
+    if (
+        image_label == router_label
+        and router_confidence >= FULL_FRAME_FALLBACK_CONFIDENCE_THRESHOLD
+        and image_confidence >= FULL_FRAME_FALLBACK_CONFIDENCE_THRESHOLD
+        and image_margin >= FULL_FRAME_FALLBACK_MARGIN_THRESHOLD
+    ):
+        return image_label, max(router_confidence, image_confidence), f"{model_type}-image-fallback"
+
+    return "", max(router_confidence, image_confidence), f"{model_type}-image-fallback"
+
+
+def should_prefer_full_frame_fallback(
+    live_label: str,
+    fallback_label: str,
+    fallback_confidence: float,
+) -> bool:
+    return (
+        bool(fallback_label)
+        and fallback_label != live_label
+        and fallback_confidence >= FULL_FRAME_OVERRIDE_CONFIDENCE_THRESHOLD
+    )
 
 
 def decode_prediction(
@@ -422,29 +467,34 @@ def choose_camera_prediction(
 ) -> tuple[str, float, str, Optional[tuple[int, int, int, int]]]:
     full_frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     boxes = extract_hand_boxes(results, frame.shape)
+    fallback_label, fallback_confidence, fallback_source = predict_full_frame_fallback(full_frame_rgb)
+    alpha_fallback_label = fallback_label if fallback_label in string.ascii_uppercase else ""
+    numeric_fallback_label = fallback_label if fallback_label in NUMBER_CLASS_SET else ""
 
     if not boxes:
-        if mode != "numeric":
-            return "", 0.0, "", None
-        label, confidence, margin = predict_rgb_image(full_frame_rgb, "number")
-        router_label, router_confidence = predict_router_label(full_frame_rgb)
-        if (
-            label in NUMBER_CLASS_SET
-            and label == router_label
-            and confidence >= FULL_FRAME_NUMBER_CONFIDENCE_THRESHOLD
-            and margin >= FULL_FRAME_NUMBER_MARGIN_THRESHOLD
-            and router_confidence >= FULL_FRAME_NUMBER_CONFIDENCE_THRESHOLD
-        ):
-            return label, confidence, "number-image-fallback", None
-        return "", confidence, "number-image-fallback", None
+        if mode == "numeric" and numeric_fallback_label:
+            return numeric_fallback_label, fallback_confidence, fallback_source, None
+        if mode != "numeric" and alpha_fallback_label:
+            return alpha_fallback_label, fallback_confidence, fallback_source, None
+        return "", fallback_confidence, fallback_source, None
 
     if mode == "numeric":
         features, active_box = extract_single_hand_features(results, frame.shape)
         if features is None:
+            if numeric_fallback_label:
+                return numeric_fallback_label, fallback_confidence, fallback_source, largest_box(boxes)
             return "", 0.0, "number-landmark", largest_box(boxes)
         label, confidence, margin = predict_live_features(features, "number")
         if label in NUMBER_CLASS_SET and is_confident_camera_prediction("number", confidence, margin):
+            if should_prefer_full_frame_fallback(
+                label,
+                numeric_fallback_label,
+                fallback_confidence,
+            ):
+                return numeric_fallback_label, fallback_confidence, fallback_source, active_box
             return label, confidence, "number-landmark", active_box
+        if numeric_fallback_label:
+            return numeric_fallback_label, fallback_confidence, fallback_source, active_box
         return "", confidence, "number-landmark", active_box
 
     feature_variants, active_box = extract_twohand_feature_variants(results, frame.shape)
@@ -455,22 +505,39 @@ def choose_camera_prediction(
         )
         label, confidence, margin = best_prediction
         if label in LIVE_TWOHAND_CLASS_SET and is_confident_camera_prediction("twohand", confidence, margin):
+            if should_prefer_full_frame_fallback(
+                label,
+                alpha_fallback_label,
+                fallback_confidence,
+            ):
+                return alpha_fallback_label, fallback_confidence, fallback_source, active_box
             return label, confidence, "twohand-landmark", active_box
+        if alpha_fallback_label:
+            return alpha_fallback_label, fallback_confidence, fallback_source, active_box
         return "", confidence, "twohand-landmark", active_box
 
-    router_label, router_confidence = predict_router_label(full_frame_rgb)
     active_box = largest_box(boxes)
-    if router_label in LIVE_TWOHAND_CLASS_SET and router_confidence >= ROUTER_CONFIDENCE_THRESHOLD:
-        return "", router_confidence, "twohand-landmark", active_box
+    if alpha_fallback_label in IMAGE_TWOHAND_CLASS_SET and fallback_confidence >= ROUTER_CONFIDENCE_THRESHOLD:
+        return alpha_fallback_label, fallback_confidence, fallback_source, active_box
 
     features, active_box = extract_single_hand_features(results, frame.shape)
     if features is None:
+        if alpha_fallback_label:
+            return alpha_fallback_label, fallback_confidence, fallback_source, active_box
         return "", 0.0, "onehand-landmark", active_box
 
     label, confidence, margin = predict_live_features(features, "onehand")
     if label in LIVE_ONEHAND_CLASS_SET and is_confident_camera_prediction("onehand", confidence, margin):
+        if should_prefer_full_frame_fallback(
+            label,
+            alpha_fallback_label,
+            fallback_confidence,
+        ):
+            return alpha_fallback_label, fallback_confidence, fallback_source, active_box
         return label, confidence, "onehand-landmark", active_box
 
+    if alpha_fallback_label:
+        return alpha_fallback_label, fallback_confidence, fallback_source, active_box
     return "", confidence, "onehand-landmark", active_box
 
 

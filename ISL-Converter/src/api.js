@@ -1,4 +1,20 @@
-export const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
+function resolveApiBase() {
+  const configuredBase = import.meta.env.VITE_API_BASE?.trim()
+  if (configuredBase) return configuredBase
+
+  if (typeof window === 'undefined') {
+    return 'http://127.0.0.1:8000'
+  }
+
+  const { hostname } = window.location
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    return `http://${hostname}:8000`
+  }
+
+  return 'https://isl-backend.onrender.com'
+}
+
+export const API_BASE = resolveApiBase()
 
 export const ENDPOINTS = {
   videoFeed: `${API_BASE}/video_feed`,

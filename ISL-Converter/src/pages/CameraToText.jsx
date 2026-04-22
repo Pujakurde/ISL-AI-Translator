@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import ThemeToggle from '../components/ThemeToggle'
 import BackButton from '../components/BackButton'
-import { ENDPOINTS } from '../api'
+import { API_BASE, ENDPOINTS } from '../api'
 
 const POLL_INTERVAL_MS = 800
 
@@ -20,6 +20,13 @@ const MODES = [
     hint: 'Number mode is active. Show one clear 0-9 hand sign to build digits.',
   },
 ]
+
+function getNetworkErrorMessage(err) {
+  if (err?.message === 'Failed to fetch') {
+    return `Cannot reach backend at ${API_BASE}. If you are using the hosted site, the backend may still be waking up on Render.`
+  }
+  return err?.message || 'Cannot connect to backend. Make sure backend1 is running.'
+}
 
 function CameraToText() {
   const lastWordRef = useRef('')
@@ -72,7 +79,7 @@ function CameraToText() {
     try {
       await setBackendMode(nextMode)
     } catch (err) {
-      setError(err?.message || 'Could not switch camera mode')
+      setError(getNetworkErrorMessage(err))
     }
   }
 
@@ -92,7 +99,7 @@ function CameraToText() {
       setStarted(true)
       setCaptureHint(`${activeMode.hint} Hold one sign steady until it appears.`)
     } catch (err) {
-      setError(err?.message || 'Cannot connect to backend. Make sure backend1 is running.')
+      setError(getNetworkErrorMessage(err))
     } finally {
       setLoading(false)
     }
@@ -171,7 +178,7 @@ function CameraToText() {
         }
       } catch {
         if (!cancelled) {
-          setError('Cannot read camera prediction. Check that backend1 is still running.')
+          setError(`Cannot read camera prediction from ${API_BASE}.`)
         }
       }
     }
