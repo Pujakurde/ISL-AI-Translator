@@ -3,9 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import ThemeToggle from '../components/ThemeToggle'
 import BackButton from '../components/BackButton'
+import { ENDPOINTS } from '../api'
 
-
-const API_URL = import.meta.env.VITE_MODEL_API_URL || 'http://127.0.0.1:8000'
 const NUMBERS = '0123456789'.split('')
 const ALPHABETS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')
 const ONEHAND_SET = new Set(['C', 'I', 'L', 'O', 'U', 'V'])
@@ -50,7 +49,7 @@ function ImageToText() {
       if (!modelType) throw new Error('Invalid sign for model')
       formData.append("model_type", modelType)
 
-      const res = await fetch(`${API_URL}/predict`, {
+      const res = await fetch(ENDPOINTS.predict, {
         method: "POST",
         body: formData,
       })

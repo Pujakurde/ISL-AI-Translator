@@ -43,6 +43,10 @@ Thumbs.db
 
 # Tooling
 .qodo/
+Backend/
+api/
+temp/
+/package-lock.json
 
 # Keep backend1 lightweight in GitHub: runtime samples/models only.
 backend1/dataset/Indian/*/*
