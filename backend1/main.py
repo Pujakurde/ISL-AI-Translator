@@ -3,10 +3,19 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import string
+import tempfile
 import time
 from pathlib import Path
 from typing import Iterator, Optional
+
+API_DIR = Path(__file__).resolve().parent
+BACKEND_TMP_DIR = API_DIR / ".tmp"
+BACKEND_TMP_DIR.mkdir(parents=True, exist_ok=True)
+for env_key in ("TMPDIR", "TEMP", "TMP", "TEST_TMPDIR"):
+    os.environ[env_key] = str(BACKEND_TMP_DIR)
+tempfile.tempdir = str(BACKEND_TMP_DIR)
 
 import cv2
 import mediapipe as mp
@@ -18,7 +27,6 @@ from PIL import Image
 from pydantic import BaseModel
 from tensorflow.keras.models import load_model
 
-API_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = API_DIR.parent
 DATASET_DIR = API_DIR / "dataset"
 INDIAN_DATASET_DIR = DATASET_DIR / "Indian"
@@ -26,19 +34,33 @@ MODELS_DIR = API_DIR / "models"
 
 CAMERA_PADDING = 24
 CONFIRMATION_DELAY = 1.2
+CAMERA_SINGLE_CROP_FACTOR = 1.35
+CAMERA_MULTI_CROP_FACTOR = 1.2
+MIN_CAMERA_HAND_SCORE = 0.45
+MIN_CAMERA_HAND_AREA_RATIO = 0.015
+MIN_CAMERA_HAND_SPAN_RATIO = 0.12
+STREAM_JPEG_QUALITY = 80
 CAMERA_CONFIDENCE_THRESHOLDS = {
     "number": 0.75,
     "onehand": 0.75,
     "twohand": 0.75,
 }
 CAMERA_MARGIN_THRESHOLD = 0.15
+IMAGE_CONFIDENCE_THRESHOLDS = {
+    "number": 0.85,
+    "onehand": 0.85,
+    "twohand": 0.85,
+}
+IMAGE_MARGIN_THRESHOLD = 0.2
 FULL_FRAME_NUMBER_CONFIDENCE_THRESHOLD = 0.95
 FULL_FRAME_NUMBER_MARGIN_THRESHOLD = 0.2
 ROUTER_CONFIDENCE_THRESHOLD = 0.6
 FULL_FRAME_FALLBACK_CONFIDENCE_THRESHOLD = 0.95
 FULL_FRAME_FALLBACK_MARGIN_THRESHOLD = 0.2
 FULL_FRAME_OVERRIDE_CONFIDENCE_THRESHOLD = 0.99
+ALPHABET_CLASS_SET = set(string.ascii_uppercase)
 ONEHAND_CLASS_SET = {"C", "I", "L", "O", "U", "V"}
+TWOHAND_CLASS_SET = ALPHABET_CLASS_SET - ONEHAND_CLASS_SET
 NUMBER_CLASS_SET = set(string.digits)
 LIVE_ONEHAND_LABELS = ["C", "I", "J", "L", "O", "U", "V"]
 LIVE_ONEHAND_CLASS_SET = set(LIVE_ONEHAND_LABELS)
@@ -195,6 +217,9 @@ def open_capture(index: int) -> Optional[cv2.VideoCapture]:
         except Exception:
             capture = cv2.VideoCapture(index)
         if capture is not None and capture.isOpened():
+            capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             print(f"Opened camera index {index} backend {backend}")
             return capture
         if capture is not None:
@@ -229,11 +254,15 @@ def preprocess_rgb_image(rgb_image: np.ndarray, model_type: str) -> np.ndarray:
     return np.expand_dims(image_array, axis=0)
 
 
-def preprocess_image_bytes(image_bytes: bytes, model_type: str) -> np.ndarray:
+def decode_image_bytes(image_bytes: bytes) -> np.ndarray:
     image = Image.open(io.BytesIO(image_bytes))
     if image.mode != "RGB":
         image = image.convert("RGB")
-    return preprocess_rgb_image(np.array(image), model_type)
+    return np.array(image)
+
+
+def preprocess_image_bytes(image_bytes: bytes, model_type: str) -> np.ndarray:
+    return preprocess_rgb_image(decode_image_bytes(image_bytes), model_type)
 
 
 def predict_batch(image_array: np.ndarray, model_type: str) -> tuple[str, float, float]:
@@ -284,7 +313,7 @@ def predict_full_frame_fallback(rgb_image: np.ndarray) -> tuple[str, float, str]
     return "", max(router_confidence, image_confidence), f"{model_type}-image-fallback"
 
 
-def should_prefer_full_frame_fallback(
+def should_prefer_image_fallback(
     live_label: str,
     fallback_label: str,
     fallback_confidence: float,
@@ -329,7 +358,10 @@ def collect_hand_candidates(results, frame_shape: tuple[int, ...]) -> list[dict[
         return candidates
 
     height, width = frame_shape[:2]
-    for hand_landmarks in results.multi_hand_landmarks:
+    frame_area = float(max(1, width * height))
+    handedness_items = list(results.multi_handedness or [])
+
+    for index, hand_landmarks in enumerate(results.multi_hand_landmarks):
         x_coords = [lm.x * width for lm in hand_landmarks.landmark]
         y_coords = [lm.y * height for lm in hand_landmarks.landmark]
         box = normalize_box(
@@ -341,11 +373,25 @@ def collect_hand_candidates(results, frame_shape: tuple[int, ...]) -> list[dict[
             ),
             frame_shape,
         )
+        area = box_area(box)
+        box_width = max(1, box[2] - box[0])
+        box_height = max(1, box[3] - box[1])
+        handedness_score = 1.0
+        if index < len(handedness_items) and handedness_items[index].classification:
+            handedness_score = float(handedness_items[index].classification[0].score)
+        area_ratio = area / frame_area
+        span_ratio = max(box_width / float(width), box_height / float(height))
+        if handedness_score < MIN_CAMERA_HAND_SCORE:
+            continue
+        if area_ratio < MIN_CAMERA_HAND_AREA_RATIO and span_ratio < MIN_CAMERA_HAND_SPAN_RATIO:
+            continue
         candidates.append(
             {
                 "box": box,
                 "landmarks": hand_landmarks,
-                "area": box_area(box),
+                "area": area,
+                "area_ratio": area_ratio,
+                "score": handedness_score,
             }
         )
 
@@ -460,41 +506,114 @@ def is_confident_camera_prediction(model_type: str, confidence: float, margin: f
     )
 
 
+def is_confident_image_prediction(model_type: str, confidence: float, margin: float) -> bool:
+    return (
+        confidence >= IMAGE_CONFIDENCE_THRESHOLDS[model_type]
+        and margin >= IMAGE_MARGIN_THRESHOLD
+    )
+
+
+def build_camera_crops(
+    frame: np.ndarray,
+    boxes: list[tuple[int, int, int, int]],
+) -> dict[str, object]:
+    largest = largest_box(boxes)
+    top_boxes = sorted(boxes, key=box_area, reverse=True)[:2]
+    merged = merge_boxes(top_boxes, frame.shape)
+    single_box = expand_box(largest, frame.shape, CAMERA_SINGLE_CROP_FACTOR)
+    merged_box = expand_box(merged, frame.shape, CAMERA_MULTI_CROP_FACTOR)
+    single_rgb = cv2.cvtColor(crop_frame(frame, single_box), cv2.COLOR_BGR2RGB)
+    merged_rgb = cv2.cvtColor(crop_frame(frame, merged_box), cv2.COLOR_BGR2RGB)
+    return {
+        "single_box": single_box,
+        "single_rgb": single_rgb,
+        "merged_box": merged_box,
+        "merged_rgb": merged_rgb,
+    }
+
+
+def predict_camera_image_fallback(
+    frame: np.ndarray,
+    boxes: list[tuple[int, int, int, int]],
+    mode: str,
+) -> tuple[str, float, str, Optional[tuple[int, int, int, int]]]:
+    if not boxes:
+        return "", 0.0, "", None
+
+    crops = build_camera_crops(frame, boxes)
+
+    if mode == "numeric":
+        label, confidence, margin = predict_rgb_image(crops["single_rgb"], "number")
+        if is_confident_image_prediction("number", confidence, margin):
+            return label, confidence, "number-image-crop", crops["single_box"]
+        return "", confidence, "number-image-crop", crops["single_box"]
+
+    router_rgb = crops["merged_rgb"] if len(boxes) >= 2 else crops["single_rgb"]
+    router_label, router_confidence = predict_router_label(router_rgb)
+    model_type = resolve_label_model_type(router_label)
+    if model_type not in {"onehand", "twohand"}:
+        return "", router_confidence, "", None
+
+    if model_type == "onehand":
+        if len(boxes) >= 2:
+            return "", router_confidence, "onehand-image-crop", crops["single_box"]
+        target_rgb = crops["single_rgb"]
+        target_box = crops["single_box"]
+    else:
+        target_rgb = crops["merged_rgb"] if len(boxes) >= 2 else crops["single_rgb"]
+        target_box = crops["merged_box"] if len(boxes) >= 2 else crops["single_box"]
+
+    label, confidence, margin = predict_rgb_image(target_rgb, model_type)
+    if (
+        router_confidence >= ROUTER_CONFIDENCE_THRESHOLD
+        and label == router_label
+        and is_confident_image_prediction(model_type, confidence, margin)
+    ):
+        return label, max(confidence, router_confidence), f"{model_type}-image-crop", target_box
+
+    return "", max(confidence, router_confidence), f"{model_type}-image-crop", target_box
+
+
 def choose_camera_prediction(
     frame: np.ndarray,
     results,
     mode: str,
 ) -> tuple[str, float, str, Optional[tuple[int, int, int, int]]]:
-    full_frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     boxes = extract_hand_boxes(results, frame.shape)
-    fallback_label, fallback_confidence, fallback_source = predict_full_frame_fallback(full_frame_rgb)
-    alpha_fallback_label = fallback_label if fallback_label in string.ascii_uppercase else ""
-    numeric_fallback_label = fallback_label if fallback_label in NUMBER_CLASS_SET else ""
+    fallback_cache: Optional[tuple[str, float, str, Optional[tuple[int, int, int, int]]]] = None
+
+    def get_fallback() -> tuple[str, float, str, Optional[tuple[int, int, int, int]]]:
+        nonlocal fallback_cache
+        if fallback_cache is None:
+            fallback_cache = predict_camera_image_fallback(frame, boxes, mode)
+        return fallback_cache
 
     if not boxes:
-        if mode == "numeric" and numeric_fallback_label:
-            return numeric_fallback_label, fallback_confidence, fallback_source, None
-        if mode != "numeric" and alpha_fallback_label:
-            return alpha_fallback_label, fallback_confidence, fallback_source, None
-        return "", fallback_confidence, fallback_source, None
+        return "", 0.0, "", None
 
     if mode == "numeric":
         features, active_box = extract_single_hand_features(results, frame.shape)
         if features is None:
+            fallback_label, fallback_confidence, fallback_source, fallback_box = get_fallback()
+            numeric_fallback_label = fallback_label if fallback_label in NUMBER_CLASS_SET else ""
             if numeric_fallback_label:
-                return numeric_fallback_label, fallback_confidence, fallback_source, largest_box(boxes)
+                return numeric_fallback_label, fallback_confidence, fallback_source, fallback_box
             return "", 0.0, "number-landmark", largest_box(boxes)
         label, confidence, margin = predict_live_features(features, "number")
         if label in NUMBER_CLASS_SET and is_confident_camera_prediction("number", confidence, margin):
-            if should_prefer_full_frame_fallback(
+            fallback_label, fallback_confidence, fallback_source, fallback_box = get_fallback()
+            numeric_fallback_label = fallback_label if fallback_label in NUMBER_CLASS_SET else ""
+            if should_prefer_image_fallback(
                 label,
                 numeric_fallback_label,
                 fallback_confidence,
             ):
-                return numeric_fallback_label, fallback_confidence, fallback_source, active_box
+                return numeric_fallback_label, fallback_confidence, fallback_source, fallback_box
             return label, confidence, "number-landmark", active_box
+        fallback_label, fallback_confidence, fallback_source, fallback_box = get_fallback()
+        numeric_fallback_label = fallback_label if fallback_label in NUMBER_CLASS_SET else ""
         if numeric_fallback_label:
-            return numeric_fallback_label, fallback_confidence, fallback_source, active_box
+            return numeric_fallback_label, fallback_confidence, fallback_source, fallback_box
         return "", confidence, "number-landmark", active_box
 
     feature_variants, active_box = extract_twohand_feature_variants(results, frame.shape)
@@ -505,39 +624,45 @@ def choose_camera_prediction(
         )
         label, confidence, margin = best_prediction
         if label in LIVE_TWOHAND_CLASS_SET and is_confident_camera_prediction("twohand", confidence, margin):
-            if should_prefer_full_frame_fallback(
+            fallback_label, fallback_confidence, fallback_source, fallback_box = get_fallback()
+            alpha_fallback_label = fallback_label if fallback_label in string.ascii_uppercase else ""
+            if should_prefer_image_fallback(
                 label,
                 alpha_fallback_label,
                 fallback_confidence,
             ):
-                return alpha_fallback_label, fallback_confidence, fallback_source, active_box
+                return alpha_fallback_label, fallback_confidence, fallback_source, fallback_box
             return label, confidence, "twohand-landmark", active_box
+        fallback_label, fallback_confidence, fallback_source, fallback_box = get_fallback()
+        alpha_fallback_label = fallback_label if fallback_label in string.ascii_uppercase else ""
         if alpha_fallback_label:
-            return alpha_fallback_label, fallback_confidence, fallback_source, active_box
+            return alpha_fallback_label, fallback_confidence, fallback_source, fallback_box
         return "", confidence, "twohand-landmark", active_box
 
     active_box = largest_box(boxes)
+    fallback_label, fallback_confidence, fallback_source, fallback_box = get_fallback()
+    alpha_fallback_label = fallback_label if fallback_label in string.ascii_uppercase else ""
     if alpha_fallback_label in IMAGE_TWOHAND_CLASS_SET and fallback_confidence >= ROUTER_CONFIDENCE_THRESHOLD:
-        return alpha_fallback_label, fallback_confidence, fallback_source, active_box
+        return alpha_fallback_label, fallback_confidence, fallback_source, fallback_box
 
     features, active_box = extract_single_hand_features(results, frame.shape)
     if features is None:
         if alpha_fallback_label:
-            return alpha_fallback_label, fallback_confidence, fallback_source, active_box
+            return alpha_fallback_label, fallback_confidence, fallback_source, fallback_box
         return "", 0.0, "onehand-landmark", active_box
 
     label, confidence, margin = predict_live_features(features, "onehand")
     if label in LIVE_ONEHAND_CLASS_SET and is_confident_camera_prediction("onehand", confidence, margin):
-        if should_prefer_full_frame_fallback(
+        if should_prefer_image_fallback(
             label,
             alpha_fallback_label,
             fallback_confidence,
         ):
-            return alpha_fallback_label, fallback_confidence, fallback_source, active_box
+            return alpha_fallback_label, fallback_confidence, fallback_source, fallback_box
         return label, confidence, "onehand-landmark", active_box
 
     if alpha_fallback_label:
-        return alpha_fallback_label, fallback_confidence, fallback_source, active_box
+        return alpha_fallback_label, fallback_confidence, fallback_source, fallback_box
     return "", confidence, "onehand-landmark", active_box
 
 
@@ -552,8 +677,9 @@ def gen_sign_to_text() -> Iterator[bytes]:
         raise HTTPException(status_code=503, detail="Camera not accessible.")
 
     hands = mp.solutions.hands.Hands(
-        min_detection_confidence=0.7,
-        min_tracking_confidence=0.5,
+        model_complexity=0,
+        min_detection_confidence=0.6,
+        min_tracking_confidence=0.45,
         max_num_hands=2,
     )
 
@@ -566,17 +692,17 @@ def gen_sign_to_text() -> Iterator[bytes]:
             frame = cv2.flip(frame, 1)
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = hands.process(rgb_frame)
+            now = time.time()
 
             label, confidence, active_model, active_box = choose_camera_prediction(
                 frame,
                 results,
                 sign_state["mode"],
             )
-            sign_state["active_model"] = active_model
-            sign_state["active_confidence"] = round(confidence, 4)
+            sign_state["active_model"] = active_model if label else ""
+            sign_state["active_confidence"] = round(confidence if label else 0.0, 4)
 
             if label:
-                now = time.time()
                 if label != pending_prediction["label"]:
                     pending_prediction["label"] = label
                     pending_prediction["start_time"] = now
@@ -613,7 +739,7 @@ def gen_sign_to_text() -> Iterator[bytes]:
             )
             cv2.putText(
                 frame,
-                f"Model: {active_model or 'waiting'}",
+                f"Model: {sign_state['active_model'] or 'waiting'}",
                 (10, 58),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.65,
@@ -622,7 +748,7 @@ def gen_sign_to_text() -> Iterator[bytes]:
             )
             cv2.putText(
                 frame,
-                f"Confidence: {confidence:.2f}",
+                f"Confidence: {sign_state['active_confidence']:.2f}",
                 (10, 88),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.65,
@@ -639,7 +765,11 @@ def gen_sign_to_text() -> Iterator[bytes]:
                 2,
             )
 
-            ok, buffer = cv2.imencode(".jpg", frame)
+            ok, buffer = cv2.imencode(
+                ".jpg",
+                frame,
+                [int(cv2.IMWRITE_JPEG_QUALITY), STREAM_JPEG_QUALITY],
+            )
             if not ok:
                 continue
             yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n"
@@ -679,7 +809,50 @@ def build_text_to_sign_image(text: str) -> Optional[np.ndarray]:
     return np.vstack(padded_images)
 
 
-def resolve_requested_model_type(model_type: str, filename: Optional[str] = None) -> str:
+def infer_model_type_from_filename(filename: Optional[str]) -> Optional[str]:
+    if not filename:
+        return None
+
+    candidates: list[str] = []
+    stem = Path(filename).stem.strip().upper()
+    if stem:
+        candidates.append(stem)
+        for token in re.findall(r"[A-Z0-9]+", stem):
+            if token and token not in candidates:
+                candidates.append(token)
+
+    for candidate in candidates:
+        if candidate in NUMBER_CLASS_SET:
+            return "number"
+        if candidate in ONEHAND_CLASS_SET:
+            return "onehand"
+        if candidate in TWOHAND_CLASS_SET:
+            return "twohand"
+    return None
+
+
+def infer_model_type_from_image(rgb_image: np.ndarray) -> str:
+    router_label, _ = predict_router_label(rgb_image)
+    routed_model_type = resolve_label_model_type(router_label)
+    if routed_model_type is not None:
+        return routed_model_type
+
+    scored_candidates = [
+        (predict_rgb_image(rgb_image, candidate_model), candidate_model)
+        for candidate_model in MODELS
+    ]
+    best_prediction, best_model_type = max(
+        scored_candidates,
+        key=lambda item: (item[0][1], item[0][2]),
+    )
+    return best_model_type
+
+
+def resolve_requested_model_type(
+    model_type: str,
+    filename: Optional[str] = None,
+    rgb_image: Optional[np.ndarray] = None,
+) -> str:
     if model_type in MODELS:
         return model_type
 
@@ -689,14 +862,12 @@ def resolve_requested_model_type(model_type: str, filename: Optional[str] = None
             detail="Invalid model_type. Use: number, onehand, twohand",
         )
 
-    if filename:
-        stem = Path(filename).stem.strip().upper()
-        if stem in NUMBER_CLASS_SET:
-            return "number"
-        if stem in ONEHAND_CLASS_SET:
-            return "onehand"
-        if stem in TWOHAND_CLASS_SET:
-            return "twohand"
+    inferred_model_type = infer_model_type_from_filename(filename)
+    if inferred_model_type is not None:
+        return inferred_model_type
+
+    if rgb_image is not None:
+        return infer_model_type_from_image(rgb_image)
 
     return "twohand"
 
@@ -710,13 +881,17 @@ async def predict_uploaded_file(
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
 
-    requested_model_type = resolve_requested_model_type(model_type, file.filename)
-
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file")
 
-    image_array = preprocess_image_bytes(file_bytes, requested_model_type)
+    rgb_image = decode_image_bytes(file_bytes)
+    requested_model_type = resolve_requested_model_type(
+        model_type,
+        file.filename,
+        rgb_image,
+    )
+    image_array = preprocess_rgb_image(rgb_image, requested_model_type)
     label, confidence, _ = predict_batch(image_array, requested_model_type)
     return {
         "prediction": label,

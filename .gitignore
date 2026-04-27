@@ -46,7 +46,12 @@ Thumbs.db
 Backend/
 api/
 temp/
+.tmp/
 /package-lock.json
+/[0-9A-Za-z_][0-9A-Za-z_][0-9A-Za-z_][0-9A-Za-z_][0-9A-Za-z_][0-9A-Za-z_][0-9A-Za-z_][0-9A-Za-z_]
+!/backend1/
+backend1/.tmp/
+backend1/[0-9A-Za-z_][0-9A-Za-z_][0-9A-Za-z_][0-9A-Za-z_][0-9A-Za-z_][0-9A-Za-z_][0-9A-Za-z_][0-9A-Za-z_]
 
 # Keep backend1 lightweight in GitHub: runtime samples/models only.
 backend1/dataset/Indian/*/*
