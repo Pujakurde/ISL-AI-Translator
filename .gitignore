@@ -44,6 +44,12 @@ Thumbs.db
 # Tooling
 .qodo/
 Backend/
+!Backend/
+Backend/*
+!Backend/README.md
+!Backend/main.py
+!Backend/main_new.py
+!Backend/requirements.txt
 api/
 temp/
 .tmp/
