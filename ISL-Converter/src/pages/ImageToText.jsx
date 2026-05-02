@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import ThemeToggle from '../components/ThemeToggle'
 import BackButton from '../components/BackButton'
@@ -10,6 +11,7 @@ const ONEHAND_SET = new Set(['C', 'I', 'L', 'O', 'U', 'V'])
 const ALL_SIGNS = [...NUMBERS, ...ALPHABETS, 'space']
 
 function ImageToText() {
+  const navigate = useNavigate()
   const [selected, setSelected] = useState([])
   const [loading, setLoading] = useState(false)
   const [results, setResults] = useState([])
@@ -30,25 +32,17 @@ function ImageToText() {
     return null
   }
 
-  function setResultAtIndex(index, nextResult) {
-    setResults(prev => {
-      const updated = [...prev]
-      updated[index] = nextResult
-      return updated
-    })
-  }
-
   async function predictSign(sign, index) {
-    const expectedLetter = sign.toUpperCase()
     setLoading(true)
     setError('')
-    setResultAtIndex(index, { letter: expectedLetter, confidence: 100 })
 
     try {
+      // fetch image from your public folder
       const imageUrl = `/Signs/${sign}.jpg`
       const response = await fetch(imageUrl)
       const blob = await response.blob()
 
+      // send as form-data
       const formData = new FormData()
       formData.append("file", blob, `${sign}.jpg`)
       const modelType = getModelType(sign)
@@ -63,34 +57,37 @@ function ImageToText() {
       const data = await res.json()
 
       if (!res.ok) {
-        throw new Error(data.detail || 'API Error')
+        setError(data.detail || 'API Error')
       } else {
-        const predictedLetter = String(data.prediction || '').toUpperCase()
-        setResultAtIndex(index, {
-          letter: expectedLetter,
-          confidence: predictedLetter === expectedLetter ? Math.round(data.confidence * 100) : 100
+        setResults(prev => {
+          const updated = [...prev]
+          updated[index] = {
+            letter: data.prediction,
+            confidence: Math.round(data.confidence * 100)
+          }
+          return updated
         })
       }
     } catch (err) {
-      setResultAtIndex(index, { letter: expectedLetter, confidence: 100 })
-      setError('Backend is unavailable, so dataset signs are using their reference labels.')
+      setError('Cannot connect to API. Make sure backend is running!')
     }
 
     setLoading(false)
   }
 
   function addSign(sign) {
-    const newIndex = selected.length
-    setSelected(prev => [...prev, sign])
-    setResults(prev => {
-      if (sign === 'space') {
-        return [...prev, { letter: ' ', confidence: 100 }]
-      }
-      return [...prev, { letter: sign, confidence: 100 }]
-    })
+  const newIndex = selected.length
+  setSelected(prev => [...prev, sign])
+  setResults(prev => {
+    if (sign === 'space') {
+      return [...prev, { letter: ' ', confidence: 100 }] // directly add space
+    }
+    return [...prev, null]
+  })
 
-    if (sign !== 'space') predictSign(sign, newIndex)
-  }
+  // Only call API if not space
+  if (sign !== 'space') predictSign(sign, newIndex)
+}
 
   function removeSign(index) {
     setSelected(prev => prev.filter((_, i) => i !== index))
