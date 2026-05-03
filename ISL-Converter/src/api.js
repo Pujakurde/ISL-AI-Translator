@@ -1,7 +1,8 @@
-const DEFAULT_REMOTE_API_BASE = 'https://isl-backend.onrender.com'
+const HOSTED_API_FALLBACK_BASE = import.meta.env.VITE_FALLBACK_API_BASE?.trim() || ''
 
 function getRemoteApiOrigin() {
-  return new URL(DEFAULT_REMOTE_API_BASE).origin
+  if (!HOSTED_API_FALLBACK_BASE) return ''
+  return new URL(HOSTED_API_FALLBACK_BASE).origin
 }
 
 function isLocalHostname(hostname) {
@@ -9,7 +10,8 @@ function isLocalHostname(hostname) {
 }
 
 function isRenderStaticHost(hostname) {
-  return hostname.endsWith('.onrender.com') && hostname !== new URL(DEFAULT_REMOTE_API_BASE).hostname
+  if (!HOSTED_API_FALLBACK_BASE) return false
+  return hostname.endsWith('.onrender.com') && hostname !== new URL(HOSTED_API_FALLBACK_BASE).hostname
 }
 
 function resolveApiBase() {
@@ -26,7 +28,7 @@ function resolveApiBase() {
   }
 
   if (isRenderStaticHost(hostname)) {
-    return DEFAULT_REMOTE_API_BASE
+    return HOSTED_API_FALLBACK_BASE
   }
 
   return window.location.origin
@@ -68,16 +70,16 @@ async function readApiPayload(response) {
 }
 
 function buildHostedFallbackUrl(url) {
-  if (typeof window === 'undefined') return null
+  if (typeof window === 'undefined' || !HOSTED_API_FALLBACK_BASE) return null
 
   const resolvedUrl = new URL(url, window.location.origin)
   const hostedOrigin = getRemoteApiOrigin()
 
-  if (resolvedUrl.origin === hostedOrigin || isLocalHostname(window.location.hostname)) {
+  if (!hostedOrigin || resolvedUrl.origin === hostedOrigin || isLocalHostname(window.location.hostname)) {
     return null
   }
 
-  return `${DEFAULT_REMOTE_API_BASE}${resolvedUrl.pathname}${resolvedUrl.search}`
+  return `${HOSTED_API_FALLBACK_BASE}${resolvedUrl.pathname}${resolvedUrl.search}`
 }
 
 export function formatApiError(response, payload, fallbackMessage = 'Request failed') {

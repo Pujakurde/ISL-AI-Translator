@@ -71,7 +71,6 @@ LIVE_TWOHAND_CLASS_SET = set(LIVE_TWOHAND_LABELS)
 DEFAULT_ALLOWED_ORIGINS = (
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "https://isl-ai-translator-1.onrender.com",
 )
 
 
@@ -80,10 +79,14 @@ class PredictionUpdate(BaseModel):
 
 
 def parse_allowed_origins() -> list[str]:
+    origins = list(DEFAULT_ALLOWED_ORIGINS)
     raw_value = os.getenv("ALLOWED_ORIGINS", "")
     if raw_value.strip():
-        return [origin.strip() for origin in raw_value.split(",") if origin.strip()]
-    return list(DEFAULT_ALLOWED_ORIGINS)
+        for origin in raw_value.split(","):
+            normalized = origin.strip()
+            if normalized and normalized not in origins:
+                origins.append(normalized)
+    return origins
 
 
 def resolve_existing_path(*candidates: Path) -> Path:

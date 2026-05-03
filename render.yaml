@@ -9,17 +9,24 @@ services:
     healthCheckPath: /health
     envVars:
       - key: ALLOWED_ORIGINS
-        value: https://isl-ai-translator-1.onrender.com
+        fromService:
+          type: web
+          name: isl-ai-translator-1
+          envVarKey: RENDER_EXTERNAL_URL
 
   - type: web
     name: isl-ai-translator-1
     runtime: static
+    plan: free
     rootDir: ISL-Converter
     buildCommand: npm ci && npm run build
     staticPublishPath: dist
     envVars:
       - key: VITE_API_BASE
-        value: https://isl-backend.onrender.com
+        fromService:
+          type: web
+          name: isl-backend
+          envVarKey: RENDER_EXTERNAL_URL
     routes:
       - type: rewrite
         source: /*
