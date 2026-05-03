@@ -1,3 +1,17 @@
+const DEFAULT_REMOTE_API_BASE = 'https://isl-backend.onrender.com'
+
+function getRemoteApiOrigin() {
+  return new URL(DEFAULT_REMOTE_API_BASE).origin
+}
+
+function isLocalHostname(hostname) {
+  return hostname === 'localhost' || hostname === '127.0.0.1'
+}
+
+function isRenderStaticHost(hostname) {
+  return hostname.endsWith('.onrender.com') && hostname !== new URL(DEFAULT_REMOTE_API_BASE).hostname
+}
+
 function resolveApiBase() {
   const configuredBase = import.meta.env.VITE_API_BASE?.trim()
   if (configuredBase) return configuredBase
@@ -7,8 +21,12 @@ function resolveApiBase() {
   }
 
   const { hostname } = window.location
-  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+  if (isLocalHostname(hostname)) {
     return `http://${hostname}:8000`
+  }
+
+  if (isRenderStaticHost(hostname)) {
+    return DEFAULT_REMOTE_API_BASE
   }
 
   return window.location.origin
@@ -49,6 +67,19 @@ async function readApiPayload(response) {
   return response.text().catch(() => '')
 }
 
+function buildHostedFallbackUrl(url) {
+  if (typeof window === 'undefined') return null
+
+  const resolvedUrl = new URL(url, window.location.origin)
+  const hostedOrigin = getRemoteApiOrigin()
+
+  if (resolvedUrl.origin === hostedOrigin || isLocalHostname(window.location.hostname)) {
+    return null
+  }
+
+  return `${DEFAULT_REMOTE_API_BASE}${resolvedUrl.pathname}${resolvedUrl.search}`
+}
+
 export function formatApiError(response, payload, fallbackMessage = 'Request failed') {
   const message = extractApiMessage(payload)
 
@@ -64,8 +95,16 @@ export function formatApiError(response, payload, fallbackMessage = 'Request fai
 }
 
 export async function fetchApi(url, options = {}, fallbackMessage = 'Request failed') {
-  const response = await fetch(url, options)
-  const payload = await readApiPayload(response)
+  let response = await fetch(url, options)
+  let payload = await readApiPayload(response)
+
+  if (!response.ok && response.status === 404) {
+    const fallbackUrl = buildHostedFallbackUrl(url)
+    if (fallbackUrl) {
+      response = await fetch(fallbackUrl, options)
+      payload = await readApiPayload(response)
+    }
+  }
 
   if (!response.ok) {
     throw new Error(formatApiError(response, payload, fallbackMessage))
