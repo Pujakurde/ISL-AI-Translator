@@ -7,7 +7,7 @@ import string
 import threading
 import time
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
 import cv2
 import mediapipe as mp
@@ -18,6 +18,10 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel
+
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+
 from tensorflow.keras.models import load_model
 
 API_DIR = Path(__file__).resolve().parent
@@ -44,6 +48,7 @@ FULL_FRAME_FALLBACK_MARGIN_THRESHOLD = 0.2
 FULL_FRAME_OVERRIDE_CONFIDENCE_THRESHOLD = 0.99
 ONEHAND_CLASS_SET = {"C", "I", "L", "O", "U", "V"}
 NUMBER_CLASS_SET = set(string.digits)
+VALID_MODEL_TYPES = {"number", "onehand", "twohand"}
 LIVE_ONEHAND_LABELS = ["C", "I", "J", "L", "O", "U", "V"]
 LIVE_ONEHAND_CLASS_SET = set(LIVE_ONEHAND_LABELS)
 LIVE_TWOHAND_LABELS = [
@@ -130,29 +135,24 @@ LIVE_MODEL_PATHS = {
     "onehand": resolve_existing_path(MODELS_DIR / "onehand_gesture_model.h5"),
     "twohand": resolve_existing_path(MODELS_DIR / "twohand_gesture_model.h5"),
 }
-
-MODELS = {model_type: load_model(str(path)) for model_type, path in MODEL_PATHS.items()}
-LABELS = {model_type: load_labels(path) for model_type, path in LABEL_PATHS.items()}
-ROUTER_MODEL = load_model(str(ROUTER_MODEL_PATH))
-LIVE_MODELS = {model_type: load_model(str(path)) for model_type, path in LIVE_MODEL_PATHS.items()}
-IMAGE_ONEHAND_CLASS_SET = set(LABELS["onehand"].values())
-IMAGE_TWOHAND_CLASS_SET = set(LABELS["twohand"].values())
 LIVE_LABELS = {
     "number": {index: label for index, label in enumerate(sorted(NUMBER_CLASS_SET))},
     "onehand": {index: label for index, label in enumerate(LIVE_ONEHAND_LABELS)},
     "twohand": {index: label for index, label in enumerate(LIVE_TWOHAND_LABELS)},
 }
-ROUTER_LABELS = {
-    value: key
-    for key, value in np.load(str(ROUTER_MAPPING_PATH), allow_pickle=True).item().items()
-}
-INPUT_SIZES = {
-    model_type: (
-        int(model.input_shape[2]),
-        int(model.input_shape[1]),
-    )
-    for model_type, model in MODELS.items()
-}
+MODELS: dict[str, Any] = {}
+LABELS: dict[str, dict[int, str]] = {}
+ROUTER_MODEL: Any = None
+LIVE_MODELS: dict[str, Any] = {}
+IMAGE_ONEHAND_CLASS_SET: set[str] = set()
+IMAGE_TWOHAND_CLASS_SET: set[str] = set()
+ROUTER_LABELS: dict[int, str] = {}
+INPUT_SIZES: dict[str, tuple[int, int]] = {}
+LIVE_HANDS: Any = None
+MODELS_READY = False
+MODEL_LOAD_ERROR = ""
+MODEL_LOAD_STARTED = False
+MODEL_LOAD_LOCK = threading.Lock()
 
 cap: Optional[cv2.VideoCapture] = None
 sign_state = {
@@ -163,12 +163,81 @@ sign_state = {
     "active_confidence": 0.0,
 }
 pending_prediction = {"label": "", "start_time": 0.0}
-LIVE_HANDS = mp.solutions.hands.Hands(
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.5,
-    max_num_hands=2,
-)
 LIVE_HANDS_LOCK = threading.Lock()
+
+
+def load_runtime_assets() -> None:
+    global MODELS
+    global LABELS
+    global ROUTER_MODEL
+    global LIVE_MODELS
+    global IMAGE_ONEHAND_CLASS_SET
+    global IMAGE_TWOHAND_CLASS_SET
+    global ROUTER_LABELS
+    global INPUT_SIZES
+    global LIVE_HANDS
+    global MODELS_READY
+    global MODEL_LOAD_ERROR
+
+    try:
+        models = {model_type: load_model(str(path)) for model_type, path in MODEL_PATHS.items()}
+        labels = {model_type: load_labels(path) for model_type, path in LABEL_PATHS.items()}
+        router_model = load_model(str(ROUTER_MODEL_PATH))
+        live_models = {model_type: load_model(str(path)) for model_type, path in LIVE_MODEL_PATHS.items()}
+        router_labels = {
+            value: key
+            for key, value in np.load(str(ROUTER_MAPPING_PATH), allow_pickle=True).item().items()
+        }
+        input_sizes = {
+            model_type: (
+                int(model.input_shape[2]),
+                int(model.input_shape[1]),
+            )
+            for model_type, model in models.items()
+        }
+        live_hands = mp.solutions.hands.Hands(
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.5,
+            max_num_hands=2,
+        )
+    except Exception as exc:
+        with MODEL_LOAD_LOCK:
+            MODEL_LOAD_ERROR = f"{type(exc).__name__}: {exc}"
+            MODELS_READY = False
+        print(f"Failed to load runtime assets: {MODEL_LOAD_ERROR}")
+        return
+
+    with MODEL_LOAD_LOCK:
+        MODELS = models
+        LABELS = labels
+        ROUTER_MODEL = router_model
+        LIVE_MODELS = live_models
+        IMAGE_ONEHAND_CLASS_SET = set(labels["onehand"].values())
+        IMAGE_TWOHAND_CLASS_SET = set(labels["twohand"].values())
+        ROUTER_LABELS = router_labels
+        INPUT_SIZES = input_sizes
+        LIVE_HANDS = live_hands
+        MODEL_LOAD_ERROR = ""
+        MODELS_READY = True
+
+
+def start_runtime_asset_load() -> None:
+    global MODEL_LOAD_STARTED
+
+    with MODEL_LOAD_LOCK:
+        if MODEL_LOAD_STARTED or MODELS_READY:
+            return
+        MODEL_LOAD_STARTED = True
+
+    threading.Thread(target=load_runtime_assets, name="runtime-asset-loader", daemon=True).start()
+
+
+def require_models_ready() -> None:
+    start_runtime_asset_load()
+    if MODEL_LOAD_ERROR:
+        raise HTTPException(status_code=503, detail=f"Runtime assets failed to load: {MODEL_LOAD_ERROR}")
+    if not MODELS_READY:
+        raise HTTPException(status_code=503, detail="Runtime assets are still loading. Please retry shortly.")
 
 app = FastAPI(title="ISL Translator Backend", version="2.0.0")
 app.add_middleware(
@@ -180,6 +249,11 @@ app.add_middleware(
 )
 if FRONTEND_ASSETS_DIR.exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_ASSETS_DIR), name="frontend-assets")
+
+
+@app.on_event("startup")
+def load_runtime_assets_on_startup() -> None:
+    start_runtime_asset_load()
 
 BASE_PATH = resolve_existing_path(INDIAN_DATASET_DIR)
 alphabet_dict: dict[str, str] = {}
@@ -616,6 +690,7 @@ def update_live_prediction_state(
 
 
 def predict_camera_frame(frame: np.ndarray, mode: str) -> dict[str, object]:
+    require_models_ready()
     normalized_mode = mode if mode in {"alphabet", "numeric"} else sign_state["mode"]
     frame = cv2.flip(frame, 1)
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -632,6 +707,7 @@ def predict_camera_frame(frame: np.ndarray, mode: str) -> dict[str, object]:
 
 
 def gen_sign_to_text() -> Iterator[bytes]:
+    require_models_ready()
     capture = get_video_capture()
     if capture is None:
         raise HTTPException(status_code=503, detail="Camera not accessible.")
@@ -743,7 +819,7 @@ def build_text_to_sign_image(text: str) -> Optional[np.ndarray]:
 
 
 def resolve_requested_model_type(model_type: str, filename: Optional[str] = None) -> str:
-    if model_type in MODELS:
+    if model_type in VALID_MODEL_TYPES:
         return model_type
 
     if model_type != "auto":
@@ -813,13 +889,36 @@ def serve_frontend_index() -> Response:
     return HTMLResponse(content="Backend running. Use frontend on localhost:5173")
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def index() -> Response:
     return serve_frontend_index()
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health():
+    start_runtime_asset_load()
+
+    if MODEL_LOAD_ERROR:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "detail": MODEL_LOAD_ERROR,
+                "loaded_models": sorted(MODELS.keys()),
+                "mode": sign_state["mode"],
+            },
+        )
+
+    if not MODELS_READY:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "loading",
+                "loaded_models": sorted(MODELS.keys()),
+                "mode": sign_state["mode"],
+            },
+        )
+
     return {
         "status": "ok",
         "loaded_models": sorted(MODELS.keys()),
@@ -829,6 +928,7 @@ def health():
 
 @app.get("/video_feed")
 def video_feed():
+    require_models_ready()
     if get_video_capture() is None:
         raise HTTPException(status_code=503, detail="Camera not accessible.")
     sign_state["running"] = True
@@ -864,6 +964,7 @@ async def predict_live_frame_route(
     file: Optional[UploadFile] = File(default=None),
     mode: str = Form(default="alphabet"),
 ):
+    require_models_ready()
     if file is None or not file.filename:
         raise HTTPException(status_code=400, detail="No file uploaded")
     if not file.content_type or not file.content_type.startswith("image/"):
@@ -916,6 +1017,7 @@ async def predict_image_route(
     file: Optional[UploadFile] = File(default=None),
     model_type: str = Form(default="auto"),
 ):
+    require_models_ready()
     return await predict_uploaded_file(file, model_type)
 
 
@@ -924,6 +1026,7 @@ async def predict_route(
     file: Optional[UploadFile] = File(default=None),
     model_type: str = Form(default="auto"),
 ):
+    require_models_ready()
     return await predict_uploaded_file(file, model_type)
 
 
@@ -938,7 +1041,7 @@ def text_to_sign_feed(text: str):
     return Response(content=buffer.tobytes(), media_type="image/jpeg")
 
 
-@app.get("/{full_path:path}")
+@app.api_route("/{full_path:path}", methods=["GET", "HEAD"])
 def frontend_routes(full_path: str) -> Response:
     frontend_file = resolve_frontend_file(full_path)
     if frontend_file is not None:
