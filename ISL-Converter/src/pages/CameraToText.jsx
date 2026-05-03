@@ -64,6 +64,23 @@ function CameraToText() {
   const MotionDiv = motion.div
   const MotionP = motion.p
 
+  const attachBrowserStream = useEffectEvent(async () => {
+    const video = videoRef.current
+    const activeStream = mediaStreamRef.current
+
+    if (!video || !activeStream) return
+
+    if (video.srcObject !== activeStream) {
+      video.srcObject = activeStream
+    }
+
+    try {
+      await video.play()
+    } catch (err) {
+      setError(getBrowserCameraErrorMessage(err))
+    }
+  })
+
   function stopBrowserStream() {
     const activeStream = mediaStreamRef.current
     if (activeStream) {
@@ -167,10 +184,6 @@ function CameraToText() {
         },
       })
       mediaStreamRef.current = mediaStream
-      if (videoRef.current) {
-        videoRef.current.srcObject = mediaStream
-        await videoRef.current.play().catch(() => {})
-      }
       lastWordRef.current = ''
       setWord('')
       setLastDetected('')
@@ -300,6 +313,13 @@ function CameraToText() {
       cancelled = true
     }
   }, [mode, word])
+
+  useEffect(() => {
+    if (!started) return undefined
+
+    void attachBrowserStream()
+    return undefined
+  }, [started, attachBrowserStream])
 
   useEffect(() => {
     return () => {
