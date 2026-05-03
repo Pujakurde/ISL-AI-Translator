@@ -17,7 +17,6 @@ services:
   - type: web
     name: isl-ai-translator-1
     runtime: static
-    plan: free
     rootDir: ISL-Converter
     buildCommand: npm ci && npm run build
     staticPublishPath: dist
