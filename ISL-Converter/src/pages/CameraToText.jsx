@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import ThemeToggle from '../components/ThemeToggle'
 import BackButton from '../components/BackButton'
-import { API_BASE, ENDPOINTS } from '../api'
+import { API_BASE, ENDPOINTS, fetchApi, getNetworkErrorMessage } from '../api'
 
 const POLL_INTERVAL_MS = 800
 
@@ -21,11 +21,8 @@ const MODES = [
   },
 ]
 
-function getNetworkErrorMessage(err) {
-  if (err?.message === 'Failed to fetch') {
-    return `Cannot reach backend at ${API_BASE}. If you are using the hosted site, the backend may still be waking up on Render.`
-  }
-  return err?.message || 'Cannot connect to backend. Make sure backend1 is running.'
+function getCameraErrorMessage(err, fallbackMessage = 'Cannot connect to backend. Make sure backend1 is running.') {
+  return getNetworkErrorMessage(err, fallbackMessage)
 }
 
 function CameraToText() {
@@ -60,11 +57,7 @@ function CameraToText() {
   }
 
   async function setBackendMode(nextMode) {
-    const response = await fetch(ENDPOINTS.setMode(nextMode))
-    if (!response.ok) {
-      const data = await response.json().catch(() => ({}))
-      throw new Error(data.detail || data.error || 'Could not switch camera mode')
-    }
+    await fetchApi(ENDPOINTS.setMode(nextMode), {}, 'Could not switch camera mode')
   }
 
   async function changeMode(nextMode) {
@@ -79,7 +72,7 @@ function CameraToText() {
     try {
       await setBackendMode(nextMode)
     } catch (err) {
-      setError(getNetworkErrorMessage(err))
+      setError(getCameraErrorMessage(err))
     }
   }
 
@@ -90,7 +83,7 @@ function CameraToText() {
     setError('')
     try {
       await setBackendMode(mode)
-      await fetch(ENDPOINTS.clearLastSign, { method: 'DELETE' }).catch(() => {})
+      await fetchApi(ENDPOINTS.clearLastSign, { method: 'DELETE' }, 'Could not clear previous prediction').catch(() => {})
       lastWordRef.current = ''
       setWord('')
       setLastDetected('')
@@ -99,7 +92,7 @@ function CameraToText() {
       setStarted(true)
       setCaptureHint(`${activeMode.hint} Hold one sign steady until it appears.`)
     } catch (err) {
-      setError(getNetworkErrorMessage(err))
+      setError(getCameraErrorMessage(err))
     } finally {
       setLoading(false)
     }
@@ -116,9 +109,9 @@ function CameraToText() {
   async function clearAll() {
     setError('')
     try {
-      await fetch(ENDPOINTS.clearLastSign, { method: 'DELETE' })
-    } catch {
-      setError('Could not clear backend text, but the frontend was reset.')
+      await fetchApi(ENDPOINTS.clearLastSign, { method: 'DELETE' }, 'Could not clear backend text')
+    } catch (err) {
+      setError(`${getCameraErrorMessage(err)} Frontend text was cleared locally.`)
     }
     lastWordRef.current = ''
     setWord('')
@@ -131,9 +124,7 @@ function CameraToText() {
 
     setError('')
     try {
-      const response = await fetch(ENDPOINTS.lastSignLast, { method: 'DELETE' })
-      const data = await response.json()
-      if (!response.ok) throw new Error(data.detail || data.error || 'Undo failed')
+      const data = await fetchApi(ENDPOINTS.lastSignLast, { method: 'DELETE' }, 'Undo failed')
       lastWordRef.current = String(data.prediction || '')
       setWord(String(data.prediction || ''))
       setLastDetected('')
@@ -147,13 +138,11 @@ function CameraToText() {
     setError('')
 
     try {
-      const response = await fetch(ENDPOINTS.lastSign, {
+      const data = await fetchApi(ENDPOINTS.lastSign, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: nextWord }),
-      })
-      const data = await response.json()
-      if (!response.ok) throw new Error(data.detail || data.error || 'Could not apply suggestion')
+      }, 'Could not apply suggestion')
       lastWordRef.current = String(data.prediction || nextWord)
       setWord(String(data.prediction || nextWord))
       setLastDetected('')
@@ -169,16 +158,14 @@ function CameraToText() {
 
     async function pollPrediction() {
       try {
-        const response = await fetch(ENDPOINTS.lastSign)
-        const data = await response.json()
-        if (!response.ok) throw new Error(data.detail || data.error || 'Prediction polling failed')
+        const data = await fetchApi(ENDPOINTS.lastSign, {}, 'Prediction polling failed')
         if (!cancelled) {
           applyPrediction(data.prediction)
           setError('')
         }
-      } catch {
+      } catch (err) {
         if (!cancelled) {
-          setError(`Cannot read camera prediction from ${API_BASE}.`)
+          setError(getCameraErrorMessage(err, `Cannot read camera prediction from ${API_BASE}.`))
         }
       }
     }
@@ -202,8 +189,7 @@ function CameraToText() {
 
     async function loadSuggestions() {
       try {
-        const response = await fetch(ENDPOINTS.suggestions(word))
-        const data = await response.json()
+        const data = await fetchApi(ENDPOINTS.suggestions(word), {}, 'Could not load suggestions')
         if (!cancelled) {
           setSuggestions(Array.isArray(data.suggestions) ? data.suggestions.slice(0, 4) : [])
         }

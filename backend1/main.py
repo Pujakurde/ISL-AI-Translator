@@ -64,10 +64,22 @@ LIVE_TWOHAND_LABELS = [
     "Z",
 ]
 LIVE_TWOHAND_CLASS_SET = set(LIVE_TWOHAND_LABELS)
+DEFAULT_ALLOWED_ORIGINS = (
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://isl-ai-translator-1.onrender.com",
+)
 
 
 class PredictionUpdate(BaseModel):
     text: str = ""
+
+
+def parse_allowed_origins() -> list[str]:
+    raw_value = os.getenv("ALLOWED_ORIGINS", "")
+    if raw_value.strip():
+        return [origin.strip() for origin in raw_value.split(",") if origin.strip()]
+    return list(DEFAULT_ALLOWED_ORIGINS)
 
 
 def resolve_existing_path(*candidates: Path) -> Path:
@@ -148,7 +160,7 @@ pending_prediction = {"label": "", "start_time": 0.0}
 app = FastAPI(title="ISL Translator Backend", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=parse_allowed_origins(),
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],

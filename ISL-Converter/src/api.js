@@ -1,3 +1,5 @@
+const DEFAULT_REMOTE_API_BASE = 'https://isl-backend.onrender.com'
+
 function resolveApiBase() {
   const configuredBase = import.meta.env.VITE_API_BASE?.trim()
   if (configuredBase) return configuredBase
@@ -11,7 +13,7 @@ function resolveApiBase() {
     return `http://${hostname}:8000`
   }
 
-  return 'https://isl-backend.onrender.com'
+  return DEFAULT_REMOTE_API_BASE
 }
 
 export const API_BASE = resolveApiBase()
@@ -27,4 +29,56 @@ export const ENDPOINTS = {
   predictImage: `${API_BASE}/predict-image`,
   textToSign: (text) => `${API_BASE}/text-to-sign/${encodeURIComponent(text)}`,
   suggestions: (prefix) => `${API_BASE}/suggestions?prefix=${encodeURIComponent(prefix)}`,
-};
+}
+
+function extractApiMessage(payload) {
+  if (!payload) return ''
+  if (typeof payload === 'string') return payload.replace(/\s+/g, ' ').trim()
+  if (typeof payload === 'object') {
+    return String(payload.detail || payload.error || payload.message || '').trim()
+  }
+  return ''
+}
+
+async function readApiPayload(response) {
+  const contentType = response.headers.get('content-type') || ''
+
+  if (contentType.includes('application/json')) {
+    return response.json().catch(() => null)
+  }
+
+  return response.text().catch(() => '')
+}
+
+export function formatApiError(response, payload, fallbackMessage = 'Request failed') {
+  const message = extractApiMessage(payload)
+
+  if (response.status === 503 && /service suspended|suspended by its owner/i.test(message)) {
+    return `Backend service at ${API_BASE} is suspended on Render. Resume or redeploy it, then try again.`
+  }
+
+  if ([502, 503, 504].includes(response.status)) {
+    return `Backend at ${API_BASE} is unavailable right now (HTTP ${response.status}). If you are using the hosted app, the Render service may be suspended or still starting.`
+  }
+
+  return message || fallbackMessage
+}
+
+export async function fetchApi(url, options = {}, fallbackMessage = 'Request failed') {
+  const response = await fetch(url, options)
+  const payload = await readApiPayload(response)
+
+  if (!response.ok) {
+    throw new Error(formatApiError(response, payload, fallbackMessage))
+  }
+
+  return payload
+}
+
+export function getNetworkErrorMessage(error, fallbackMessage = `Cannot reach backend at ${API_BASE}.`) {
+  if (error?.message === 'Failed to fetch') {
+    return `Cannot reach backend at ${API_BASE}. If you are using the hosted app, check whether the Render backend is suspended or still starting.`
+  }
+
+  return error?.message || fallbackMessage
+}

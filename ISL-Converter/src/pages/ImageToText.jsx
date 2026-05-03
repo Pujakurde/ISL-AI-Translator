@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import ThemeToggle from '../components/ThemeToggle'
 import BackButton from '../components/BackButton'
-import { ENDPOINTS } from '../api'
+import { ENDPOINTS, fetchApi, getNetworkErrorMessage } from '../api'
 
 const NUMBERS = '0123456789'.split('')
 const ALPHABETS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')
@@ -37,39 +37,36 @@ function ImageToText() {
     setError('')
 
     try {
-      // fetch image from your public folder
       const imageUrl = `/Signs/${sign}.jpg`
       const response = await fetch(imageUrl)
+      if (!response.ok) throw new Error(`Could not load sample sign image for ${sign}.`)
       const blob = await response.blob()
 
-      // send as form-data
       const formData = new FormData()
       formData.append("file", blob, `${sign}.jpg`)
       const modelType = getModelType(sign)
       if (!modelType) throw new Error('Invalid sign for model')
       formData.append("model_type", modelType)
 
-      const res = await fetch(ENDPOINTS.predict, {
+      const data = await fetchApi(ENDPOINTS.predict, {
         method: "POST",
         body: formData,
+      }, 'API Error')
+
+      setResults(prev => {
+        const updated = [...prev]
+        updated[index] = {
+          letter: data.prediction,
+          confidence: Math.round(data.confidence * 100)
+        }
+        return updated
       })
-
-      const data = await res.json()
-
-      if (!res.ok) {
-        setError(data.detail || 'API Error')
-      } else {
-        setResults(prev => {
-          const updated = [...prev]
-          updated[index] = {
-            letter: data.prediction,
-            confidence: Math.round(data.confidence * 100)
-          }
-          return updated
-        })
-      }
     } catch (err) {
-      setError('Cannot connect to API. Make sure backend is running!')
+      if (err?.message?.startsWith('Could not load sample sign image')) {
+        setError(err.message)
+      } else {
+        setError(getNetworkErrorMessage(err, 'Cannot connect to API. Make sure backend is running!'))
+      }
     }
 
     setLoading(false)
