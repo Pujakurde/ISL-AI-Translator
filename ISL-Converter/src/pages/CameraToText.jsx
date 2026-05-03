@@ -1,11 +1,10 @@
-import { useEffect, useEffectEvent, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import ThemeToggle from '../components/ThemeToggle'
 import BackButton from '../components/BackButton'
 import { API_BASE, ENDPOINTS, fetchApi, getNetworkErrorMessage } from '../api'
 
 const POLL_INTERVAL_MS = 800
-const FRAME_IMAGE_QUALITY = 0.82
 
 const MODES = [
   {
@@ -26,32 +25,13 @@ function getCameraErrorMessage(err, fallbackMessage = 'Cannot connect to backend
   return getNetworkErrorMessage(err, fallbackMessage)
 }
 
-function getBrowserCameraErrorMessage(err) {
-  if (err?.name === 'NotAllowedError') {
-    return 'Camera access was blocked. Allow webcam permission in your browser and try again.'
-  }
-  if (err?.name === 'NotFoundError') {
-    return 'No camera was found on this device.'
-  }
-  if (err?.name === 'NotReadableError') {
-    return 'Your camera is already in use by another app.'
-  }
-  if (err?.name === 'SecurityError') {
-    return 'Camera access is only available in a secure browser context.'
-  }
-  return err?.message || 'Could not start your webcam.'
-}
-
 function CameraToText() {
   const lastWordRef = useRef('')
-  const videoRef = useRef(null)
-  const captureCanvasRef = useRef(null)
-  const mediaStreamRef = useRef(null)
-  const isUploadingFrameRef = useRef(false)
 
   const [started, setStarted] = useState(false)
   const [loading, setLoading] = useState(false)
   const [mode, setMode] = useState('alphabet')
+  const [streamSrc, setStreamSrc] = useState('')
   const [word, setWord] = useState('')
   const [lastDetected, setLastDetected] = useState('')
   const [suggestions, setSuggestions] = useState([])
@@ -60,73 +40,6 @@ function CameraToText() {
 
   const displayWord = word.toUpperCase()
   const activeMode = MODES.find(item => item.value === mode) || MODES[0]
-  const MotionButton = motion.button
-  const MotionDiv = motion.div
-  const MotionP = motion.p
-
-  const attachBrowserStream = useEffectEvent(async () => {
-    const video = videoRef.current
-    const activeStream = mediaStreamRef.current
-
-    if (!video || !activeStream) return
-
-    if (video.srcObject !== activeStream) {
-      video.srcObject = activeStream
-    }
-
-    try {
-      await video.play()
-    } catch (err) {
-      setError(getBrowserCameraErrorMessage(err))
-    }
-  })
-
-  function stopBrowserStream() {
-    const activeStream = mediaStreamRef.current
-    if (activeStream) {
-      activeStream.getTracks().forEach(track => track.stop())
-      mediaStreamRef.current = null
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null
-    }
-  }
-
-  async function captureFrameBlob() {
-    const video = videoRef.current
-    const canvas = captureCanvasRef.current
-
-    if (!video || !canvas || video.readyState < 2) return null
-
-    const width = video.videoWidth || 960
-    const height = video.videoHeight || 720
-    canvas.width = width
-    canvas.height = height
-
-    const context = canvas.getContext('2d')
-    if (!context) return null
-
-    context.drawImage(video, 0, 0, width, height)
-    return new Promise(resolve => {
-      canvas.toBlob(resolve, 'image/jpeg', FRAME_IMAGE_QUALITY)
-    })
-  }
-
-  const uploadPredictionFrame = useEffectEvent(async (activeModeValue) => {
-    const blob = await captureFrameBlob()
-    if (!blob) return
-
-    const formData = new FormData()
-    formData.append('file', blob, 'frame.jpg')
-    formData.append('mode', activeModeValue)
-
-    const data = await fetchApi(ENDPOINTS.predictLiveFrame, {
-      method: 'POST',
-      body: formData,
-    }, 'Prediction polling failed')
-
-    applyPrediction(data.current_word)
-  })
 
   function applyPrediction(nextPrediction) {
     const nextWord = String(nextPrediction || '')
@@ -165,38 +78,21 @@ function CameraToText() {
 
   async function startCamera() {
     if (started) return
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setError('Camera access is not supported in this browser.')
-      return
-    }
 
     setLoading(true)
     setError('')
     try {
       await setBackendMode(mode)
       await fetchApi(ENDPOINTS.clearLastSign, { method: 'DELETE' }, 'Could not clear previous prediction').catch(() => {})
-      const mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          facingMode: 'user',
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-      })
-      mediaStreamRef.current = mediaStream
       lastWordRef.current = ''
       setWord('')
       setLastDetected('')
       setSuggestions([])
+      setStreamSrc(`${ENDPOINTS.videoFeed}?t=${Date.now()}`)
       setStarted(true)
       setCaptureHint(`${activeMode.hint} Hold one sign steady until it appears.`)
     } catch (err) {
-      stopBrowserStream()
-      if (['NotAllowedError', 'NotFoundError', 'NotReadableError', 'SecurityError'].includes(err?.name)) {
-        setError(getBrowserCameraErrorMessage(err))
-      } else {
-        setError(getCameraErrorMessage(err))
-      }
+      setError(getCameraErrorMessage(err))
     } finally {
       setLoading(false)
     }
@@ -204,7 +100,7 @@ function CameraToText() {
 
   async function stopCamera() {
     setStarted(false)
-    stopBrowserStream()
+    setStreamSrc('')
     setLastDetected('')
     setCaptureHint('Camera stopped. Choose a mode and start again when ready.')
     await fetch(ENDPOINTS.stopCamera, { method: 'POST' }).catch(() => {})
@@ -261,20 +157,16 @@ function CameraToText() {
     let cancelled = false
 
     async function pollPrediction() {
-      if (isUploadingFrameRef.current) return
-
-      isUploadingFrameRef.current = true
       try {
-        await uploadPredictionFrame(mode)
+        const data = await fetchApi(ENDPOINTS.lastSign, {}, 'Prediction polling failed')
         if (!cancelled) {
+          applyPrediction(data.prediction)
           setError('')
         }
       } catch (err) {
         if (!cancelled) {
           setError(getCameraErrorMessage(err, `Cannot read camera prediction from ${API_BASE}.`))
         }
-      } finally {
-        isUploadingFrameRef.current = false
       }
     }
 
@@ -283,10 +175,9 @@ function CameraToText() {
 
     return () => {
       cancelled = true
-      isUploadingFrameRef.current = false
       window.clearInterval(intervalId)
     }
-  }, [started, mode])
+  }, [started])
 
   useEffect(() => {
     if (mode !== 'alphabet' || !word) {
@@ -315,15 +206,7 @@ function CameraToText() {
   }, [mode, word])
 
   useEffect(() => {
-    if (!started) return undefined
-
-    void attachBrowserStream()
-    return undefined
-  }, [started, attachBrowserStream])
-
-  useEffect(() => {
     return () => {
-      stopBrowserStream()
       fetch(ENDPOINTS.stopCamera, { method: 'POST' }).catch(() => {})
     }
   }, [])
@@ -337,7 +220,7 @@ function CameraToText() {
         <div className="cam-left-panel">
           <div className="cam-mode-row" aria-label="Camera detection mode">
             {MODES.map(item => (
-              <MotionButton
+              <motion.button
                 key={item.value}
                 className={`cam-mode-btn ${mode === item.value ? 'active' : ''}`}
                 onClick={() => changeMode(item.value)}
@@ -347,19 +230,21 @@ function CameraToText() {
               >
                 <span>{item.label}</span>
                 <small>{item.detail}</small>
-              </MotionButton>
+              </motion.button>
             ))}
           </div>
 
           <div className="cam-fullscreen">
-            {started ? (
-              <video
-                ref={videoRef}
-                autoPlay
-                muted
-                playsInline
+            {started && streamSrc ? (
+              <img
+                src={streamSrc}
+                alt="Live ISL camera detection"
                 className="cam-fullvideo"
-                style={{ transform: 'scaleX(-1)' }}
+                onError={() => {
+                  setError('Camera stream failed. Make sure backend1 can access your webcam.')
+                  setStarted(false)
+                  setStreamSrc('')
+                }}
               />
             ) : (
               <div className="cam-full-placeholder">
@@ -370,7 +255,6 @@ function CameraToText() {
                 </p>
               </div>
             )}
-            <canvas ref={captureCanvasRef} style={{ display: 'none' }} aria-hidden="true" />
 
             {started && (
               <div className="cam-live-badge">
@@ -381,7 +265,7 @@ function CameraToText() {
 
             <AnimatePresence>
               {started && lastDetected && (
-                <MotionDiv
+                <motion.div
                   className="cam-big-overlay"
                   key={`${lastDetected}-${word.length}`}
                   initial={{ scale: 0.4, opacity: 0 }}
@@ -390,14 +274,14 @@ function CameraToText() {
                   transition={{ type: 'spring', stiffness: 300, damping: 20 }}
                 >
                   {lastDetected}
-                </MotionDiv>
+                </motion.div>
               )}
             </AnimatePresence>
           </div>
 
           <div className="cam-button-row">
             {!started ? (
-              <MotionButton
+              <motion.button
                 className="cam-action-btn primary"
                 onClick={startCamera}
                 disabled={loading}
@@ -406,9 +290,9 @@ function CameraToText() {
                 type="button"
               >
                 {loading ? 'Starting...' : 'Start Camera'}
-              </MotionButton>
+              </motion.button>
             ) : (
-              <MotionButton
+              <motion.button
                 className="cam-action-btn stop"
                 onClick={stopCamera}
                 whileHover={{ scale: 1.04 }}
@@ -416,10 +300,10 @@ function CameraToText() {
                 type="button"
               >
                 Stop Camera
-              </MotionButton>
+              </motion.button>
             )}
 
-            <MotionButton
+            <motion.button
               className="cam-action-btn secondary"
               onClick={removeLastLetter}
               disabled={!word}
@@ -428,9 +312,9 @@ function CameraToText() {
               type="button"
             >
               Undo
-            </MotionButton>
+            </motion.button>
 
-            <MotionButton
+            <motion.button
               className="cam-action-btn secondary"
               onClick={clearAll}
               disabled={!word && !lastDetected}
@@ -439,11 +323,11 @@ function CameraToText() {
               type="button"
             >
               Clear
-            </MotionButton>
+            </motion.button>
           </div>
         </div>
 
-        <MotionDiv
+        <motion.div
           className="cam-bottom-card"
           initial={{ opacity: 0, x: 20 }}
           animate={{ opacity: 1, x: 0 }}
@@ -453,9 +337,9 @@ function CameraToText() {
             {displayWord ? (
               <div className="cam-word-box">
                 <p className="cam-word-label">Detected Text</p>
-                <MotionP className="cam-word-display" key={displayWord} initial={{ scale: 0.95 }} animate={{ scale: 1 }}>
+                <motion.p className="cam-word-display" key={displayWord} initial={{ scale: 0.95 }} animate={{ scale: 1 }}>
                   {displayWord}
-                </MotionP>
+                </motion.p>
               </div>
             ) : (
               <div className="cam-word-empty">
@@ -472,7 +356,7 @@ function CameraToText() {
 
             <AnimatePresence>
               {suggestions.length > 0 && (
-                <MotionDiv
+                <motion.div
                   className="cam-suggestions"
                   initial={{ opacity: 0, y: 5 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -480,7 +364,7 @@ function CameraToText() {
                 >
                   <span className="cam-suggest-label">Suggestions</span>
                   {suggestions.map((suggestion, index) => (
-                    <MotionButton
+                    <motion.button
                       key={`${suggestion}-${index}`}
                       className="cam-suggest-btn"
                       onClick={() => acceptSuggestion(suggestion)}
@@ -492,9 +376,9 @@ function CameraToText() {
                       type="button"
                     >
                       {suggestion}
-                    </MotionButton>
+                    </motion.button>
                   ))}
-                </MotionDiv>
+                </motion.div>
               )}
             </AnimatePresence>
 
@@ -509,17 +393,17 @@ function CameraToText() {
             {started && (
               <p className="cam-auto-info">
                 <span className="cam-live-dot" style={{ display: 'inline-block', marginRight: 6 }} />
-                Live sign detection is running from your webcam.
+                Backend camera detection is running automatically.
               </p>
             )}
 
             {error && (
-              <MotionDiv className="error-box" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+              <motion.div className="error-box" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
                 {error}
-              </MotionDiv>
+              </motion.div>
             )}
           </div>
-        </MotionDiv>
+        </motion.div>
       </div>
     </div>
   )
