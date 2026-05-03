@@ -4,6 +4,7 @@ import io
 import json
 import os
 import string
+import threading
 import time
 from pathlib import Path
 from typing import Iterator, Optional
@@ -13,7 +14,8 @@ import mediapipe as mp
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel
 from tensorflow.keras.models import load_model
@@ -23,6 +25,8 @@ PROJECT_ROOT = API_DIR.parent
 DATASET_DIR = API_DIR / "dataset"
 INDIAN_DATASET_DIR = DATASET_DIR / "Indian"
 MODELS_DIR = API_DIR / "models"
+FRONTEND_DIST_DIR = PROJECT_ROOT / "ISL-Converter" / "dist"
+FRONTEND_ASSETS_DIR = FRONTEND_DIST_DIR / "assets"
 
 CAMERA_PADDING = 24
 CONFIRMATION_DELAY = 1.2
@@ -156,6 +160,12 @@ sign_state = {
     "active_confidence": 0.0,
 }
 pending_prediction = {"label": "", "start_time": 0.0}
+LIVE_HANDS = mp.solutions.hands.Hands(
+    min_detection_confidence=0.7,
+    min_tracking_confidence=0.5,
+    max_num_hands=2,
+)
+LIVE_HANDS_LOCK = threading.Lock()
 
 app = FastAPI(title="ISL Translator Backend", version="2.0.0")
 app.add_middleware(
@@ -165,6 +175,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+if FRONTEND_ASSETS_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=FRONTEND_ASSETS_DIR), name="frontend-assets")
 
 BASE_PATH = resolve_existing_path(INDIAN_DATASET_DIR)
 alphabet_dict: dict[str, str] = {}
@@ -241,11 +253,15 @@ def preprocess_rgb_image(rgb_image: np.ndarray, model_type: str) -> np.ndarray:
     return np.expand_dims(image_array, axis=0)
 
 
-def preprocess_image_bytes(image_bytes: bytes, model_type: str) -> np.ndarray:
+def load_rgb_image_from_bytes(image_bytes: bytes) -> np.ndarray:
     image = Image.open(io.BytesIO(image_bytes))
     if image.mode != "RGB":
         image = image.convert("RGB")
-    return preprocess_rgb_image(np.array(image), model_type)
+    return np.array(image)
+
+
+def preprocess_image_bytes(image_bytes: bytes, model_type: str) -> np.ndarray:
+    return preprocess_rgb_image(load_rgb_image_from_bytes(image_bytes), model_type)
 
 
 def predict_batch(image_array: np.ndarray, model_type: str) -> tuple[str, float, float]:
@@ -558,16 +574,64 @@ def reset_pending_prediction() -> None:
     pending_prediction["start_time"] = 0.0
 
 
+def update_live_prediction_state(
+    label: str,
+    confidence: float,
+    active_model: str,
+    mode: str,
+) -> dict[str, object]:
+    sign_state["mode"] = mode
+    sign_state["active_model"] = active_model
+    sign_state["active_confidence"] = round(confidence, 4)
+
+    accepted_prediction = ""
+    if label:
+        now = time.time()
+        if label != pending_prediction["label"]:
+            pending_prediction["label"] = label
+            pending_prediction["start_time"] = now
+        elif now - pending_prediction["start_time"] >= CONFIRMATION_DELAY:
+            accepted_prediction = label
+            if sign_state["mode"] == "alphabet":
+                sign_state["current_word"] += label.lower()
+            else:
+                sign_state["current_word"] += label
+            sign_state["current_word"] = sign_state["current_word"][-30:]
+            reset_pending_prediction()
+    else:
+        reset_pending_prediction()
+
+    return {
+        "prediction": label,
+        "accepted_prediction": accepted_prediction,
+        "current_word": sign_state["current_word"],
+        "mode": sign_state["mode"],
+        "active_model": sign_state["active_model"],
+        "confidence": sign_state["active_confidence"],
+        "pending_prediction": pending_prediction["label"],
+    }
+
+
+def predict_camera_frame(frame: np.ndarray, mode: str) -> dict[str, object]:
+    normalized_mode = mode if mode in {"alphabet", "numeric"} else sign_state["mode"]
+    frame = cv2.flip(frame, 1)
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+    with LIVE_HANDS_LOCK:
+        results = LIVE_HANDS.process(rgb_frame)
+
+    label, confidence, active_model, _ = choose_camera_prediction(
+        frame,
+        results,
+        normalized_mode,
+    )
+    return update_live_prediction_state(label, confidence, active_model, normalized_mode)
+
+
 def gen_sign_to_text() -> Iterator[bytes]:
     capture = get_video_capture()
     if capture is None:
         raise HTTPException(status_code=503, detail="Camera not accessible.")
-
-    hands = mp.solutions.hands.Hands(
-        min_detection_confidence=0.7,
-        min_tracking_confidence=0.5,
-        max_num_hands=2,
-    )
 
     try:
         while sign_state.get("running", True):
@@ -577,30 +641,15 @@ def gen_sign_to_text() -> Iterator[bytes]:
 
             frame = cv2.flip(frame, 1)
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = hands.process(rgb_frame)
+            with LIVE_HANDS_LOCK:
+                results = LIVE_HANDS.process(rgb_frame)
 
             label, confidence, active_model, active_box = choose_camera_prediction(
                 frame,
                 results,
                 sign_state["mode"],
             )
-            sign_state["active_model"] = active_model
-            sign_state["active_confidence"] = round(confidence, 4)
-
-            if label:
-                now = time.time()
-                if label != pending_prediction["label"]:
-                    pending_prediction["label"] = label
-                    pending_prediction["start_time"] = now
-                elif now - pending_prediction["start_time"] >= CONFIRMATION_DELAY:
-                    if sign_state["mode"] == "alphabet":
-                        sign_state["current_word"] += label.lower()
-                    else:
-                        sign_state["current_word"] += label
-                    sign_state["current_word"] = sign_state["current_word"][-30:]
-                    reset_pending_prediction()
-            else:
-                reset_pending_prediction()
+            update_live_prediction_state(label, confidence, active_model, sign_state["mode"])
 
             if active_box is not None:
                 x_min, y_min, x_max, y_max = active_box
@@ -656,7 +705,6 @@ def gen_sign_to_text() -> Iterator[bytes]:
                 continue
             yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n"
     finally:
-        hands.close()
         release_video_capture()
 
 
@@ -738,9 +786,33 @@ async def predict_uploaded_file(
     }
 
 
-@app.get("/", response_class=HTMLResponse)
-def index() -> HTMLResponse:
+def resolve_frontend_file(path_name: str) -> Optional[Path]:
+    index_path = FRONTEND_DIST_DIR / "index.html"
+    if not index_path.exists():
+        return None
+
+    target = (FRONTEND_DIST_DIR / path_name).resolve()
+    frontend_root = FRONTEND_DIST_DIR.resolve()
+    try:
+        target.relative_to(frontend_root)
+    except ValueError:
+        return None
+
+    if target.exists() and target.is_file():
+        return target
+    return None
+
+
+def serve_frontend_index() -> Response:
+    index_path = resolve_frontend_file("index.html")
+    if index_path is not None:
+        return FileResponse(index_path)
     return HTMLResponse(content="Backend running. Use frontend on localhost:5173")
+
+
+@app.get("/")
+def index() -> Response:
+    return serve_frontend_index()
 
 
 @app.get("/health")
@@ -782,6 +854,27 @@ def set_mode(mode: str):
     sign_state["active_confidence"] = 0.0
     reset_pending_prediction()
     return {"status": "ok", "mode": mode}
+
+
+@app.post("/predict-live-frame")
+async def predict_live_frame_route(
+    file: Optional[UploadFile] = File(default=None),
+    mode: str = Form(default="alphabet"),
+):
+    if file is None or not file.filename:
+        raise HTTPException(status_code=400, detail="No file uploaded")
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    if mode not in {"alphabet", "numeric"}:
+        raise HTTPException(status_code=400, detail="invalid mode")
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    rgb_image = load_rgb_image_from_bytes(file_bytes)
+    frame = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
+    return predict_camera_frame(frame, mode)
 
 
 @app.get("/last-prediction/sign")
@@ -840,6 +933,14 @@ def text_to_sign_feed(text: str):
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to encode image")
     return Response(content=buffer.tobytes(), media_type="image/jpeg")
+
+
+@app.get("/{full_path:path}")
+def frontend_routes(full_path: str) -> Response:
+    frontend_file = resolve_frontend_file(full_path)
+    if frontend_file is not None:
+        return FileResponse(frontend_file)
+    return serve_frontend_index()
 
 
 if __name__ == "__main__":

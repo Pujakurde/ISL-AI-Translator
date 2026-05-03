@@ -1,5 +1,3 @@
-const DEFAULT_REMOTE_API_BASE = 'https://isl-backend.onrender.com'
-
 function resolveApiBase() {
   const configuredBase = import.meta.env.VITE_API_BASE?.trim()
   if (configuredBase) return configuredBase
@@ -13,7 +11,7 @@ function resolveApiBase() {
     return `http://${hostname}:8000`
   }
 
-  return DEFAULT_REMOTE_API_BASE
+  return window.location.origin
 }
 
 export const API_BASE = resolveApiBase()
@@ -22,6 +20,7 @@ export const ENDPOINTS = {
   videoFeed: `${API_BASE}/video_feed`,
   stopCamera: `${API_BASE}/stop-camera`,
   setMode: (mode) => `${API_BASE}/set-mode/${mode}`,
+  predictLiveFrame: `${API_BASE}/predict-live-frame`,
   lastSign: `${API_BASE}/last-prediction/sign`,
   clearLastSign: `${API_BASE}/last-prediction/sign`,
   lastSignLast: `${API_BASE}/last-prediction/sign/last`,
